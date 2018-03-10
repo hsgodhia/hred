@@ -1,4 +1,4 @@
-import torch.nn as nn, torch, numpy as np
+import torch.nn as nn, torch, numpy as np, copy, pdb
 from torch.autograd import Variable
 use_cuda = torch.cuda.is_available()
 
@@ -68,33 +68,67 @@ class Decoder(nn.Module):
         self.loss_cri = nn.NLLLoss()
         self.teacher_forcing = teacher
 
-    def forward(self, ses_encoding, x=None, x_lens=None):
+    def forward(self, ses_encoding, greedy=True, beam=5, x=None, x_lens=None):
         ses_encoding = self.tanh(self.lin1(ses_encoding))
-
+        # indicator that we are doing inference
         if x is None:
-            # we use this for inference when the only input is the ses_encoding
-            siz = ses_encoding.size(0)
-            # in each iteration the generated sentence's length increases by 1 so loop terminates
-            gen_len, sent, hid_n = 0, np.zeros(siz, 50), ses_encoding
-            # the start token has index 1
-
-            tok = Variable(torch.ones(siz, 1).long())
-            sent[:, 0] = tok.data[:, 0].numpy()
+            tok = Variable(torch.ones(1, 1).long())
             if use_cuda:
                 tok = tok.cuda()
+            hid_n = ses_encoding
+            if greedy:
+                sent, gen_len = np.zeros((1, 10), dtype=int), 0
+                sent[:, 0] = tok.data[:, 0].numpy()
 
-            while True:
-                if gen_len > 50 or tok.data[0, 0] == 2:
-                    break
-                tok_vec = self.embed(tok)
-                hid_n, _ = self.rnn(tok_vec, hid_n)
-                op = self.lin2(hid_n)
-                op = self.log_soft(op)
-                op = op.squeeze(1)
-                tok_val, tok = torch.max(op, dim=1, keepdim=True)
-                sent[:, gen_len] = tok.data[:, 0].numpy()
-                gen_len += 1
-            return sent
+                if use_cuda:
+                    tok = tok.cuda()
+
+                while True:
+                    if gen_len >= 10 or tok.data[0, 0] == 2:
+                        break
+                    tok_vec = self.embed(tok)
+                    hid_n, _ = self.rnn(tok_vec, hid_n)
+                    op = self.lin2(hid_n)
+                    op = self.log_soft(op)
+                    op = op.squeeze(1)
+                    tok_val, tok = torch.max(op, dim=1, keepdim=True)
+                    sent[:, gen_len] = tok.data[:, 0].numpy()
+                    gen_len += 1
+                return sent
+
+            else:
+                # todo change this for batch size
+                gen_len, sent = 0, np.zeros((beam, 10), dtype=int)
+                qu = list()
+                qu.append([(tok, 0)])
+                while len(qu) > 0:
+                    tok_so_far = qu.pop(0)
+                    tok, tok_score = tok_so_far[-1]
+                    tok_vec = self.embed(tok)
+                    hid_n, _ = self.rnn(tok_vec, hid_n)
+                    op = self.lin2(hid_n)
+                    op = self.log_soft(op)
+                    op = op.squeeze(1)
+                    # a matrix of size 1, 10004
+                    tok_val, tok = torch.topk(op, beam, dim=1, largest=True, sorted=False)
+                    for it in range(beam):
+                        if gen_len >= 5:
+                            continue
+                        elif len(tok_so_far) >= 10:
+                            for ir, (rt, rs) in enumerate(tok_so_far):
+                                sent[gen_len, ir] = rt.data[0, 0]
+                            gen_len += 1
+                        else:
+                            tok_so_far.append((tok[:, it].unsqueeze(1), tok_score + tok_val.data[0, it]))
+                            qu.append(copy.copy(tok_so_far))
+                            tok_so_far.pop()
+
+                    if len(qu) > beam:
+                        # we want to maximize log likelihood
+                        qu.sort(key=lambda temp: temp[-1][1]/temp[-1][0].size(1), reverse=True)
+                        qu = qu[:beam]
+
+                return sent
         else:
             loss = 0
             if use_cuda:

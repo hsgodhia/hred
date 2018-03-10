@@ -1,5 +1,4 @@
 import argparse
-import copy
 import pickle
 import time
 
@@ -8,6 +7,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 
 from modules import *
+from util import *
 
 use_cuda = torch.cuda.is_available()
 torch.manual_seed(123)
@@ -120,7 +120,7 @@ def calc_valid_loss(base_enc, ses_enc, dec):
     base_enc.eval()
     ses_enc.eval()
     dec.eval()
-    dec.set_teacher_forcing(False)
+    # dec.set_teacher_forcing(False)
 
     bt_siz, valid_dataset = 32, MovieTriples('valid', 32)
     valid_dataloader = DataLoader(valid_dataset, batch_size=bt_siz, shuffle=False, num_workers=2,
@@ -141,7 +141,7 @@ def calc_valid_loss(base_enc, ses_enc, dec):
     base_enc.train()
     ses_enc.train()
     dec.train()
-    dec.set_teacher_forcing(True)
+    # dec.set_teacher_forcing(True)
 
     return valid_loss/(1 + i_batch)
 
@@ -210,7 +210,7 @@ def main():
         inv_dict[f] = tok
 
     parser = argparse.ArgumentParser(description='HRED parameter options')
-    parser.add_argument('-e', dest='e', type=int, default=5, help='number of epochs')
+    parser.add_argument('-e', dest='e', type=int, default=15, help='number of epochs')
     options = parser.parse_args()
 
     base_enc = BaseEncoder(10004, 300, 1000, 1, False)
@@ -221,50 +221,12 @@ def main():
         ses_enc.cuda()
         dec.cuda()
 
-    train(options, base_enc, ses_enc, dec)
-    # inference_beam(base_enc, ses_enc, dec, inv_dict)
-
-
-def tensor_to_sent(x, inv_dict):
-    sent = []
-    for i in x:
-        sent.append(inv_dict[i])
-
-    return " ".join(sent)
-
-
-# sample a sentence from the test set by using beam search
-# todo currently does greedy modify to do beam
-def inference_beam(base_enc, ses_enc, dec, inv_dict, width=5):
-    saved_state = torch.load("enc_mdl.pth")
-    base_enc.load_state_dict(saved_state)
-
-    saved_state = torch.load("ses_mdl.pth")
-    ses_enc.load_state_dict(saved_state)
-
-    saved_state = torch.load("dec_mdl.pth")
-    dec.load_state_dict(saved_state)
-
-    base_enc.eval()
-    ses_enc.eval()
-    dec.eval()
-
-    # todo not sure how to do inference for batch size > 1
-    bt_siz, test_dataset = 32, MovieTriples(data_type='train', bt_siz='32')
+    # train(options, base_enc, ses_enc, dec)
+    bt_siz, test_dataset = 1, MovieTriples(data_type='train', len=5)
     test_dataloader = DataLoader(test_dataset, batch_size=bt_siz, shuffle=False, num_workers=2,
                                   collate_fn=custom_collate_fn)
 
-    for i_batch, sample_batch in enumerate(test_dataloader):
-        u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3], \
-                                                sample_batch[4], sample_batch[5]
-        o1, o2 = base_enc(u1, u1_lens), base_enc(u2, u2_lens)
-        qu_seq = torch.cat((o1, o2), 1)
-
-        # if we need to decode the intermediate queries we may need the hidden states
-        final_session_o = ses_enc(qu_seq)
-
-        sent = dec(final_session_o)
-        print(tensor_to_sent(sent, inv_dict))
+    inference_beam(test_dataloader, base_enc, ses_enc, dec, inv_dict)
 
 
 main()
