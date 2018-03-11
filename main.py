@@ -15,6 +15,7 @@ if use_cuda:
 
 
 def custom_collate_fn(batch):
+    # todo default truncates sequence till 80 words and <pad> is 10003
     bt_siz = len(batch)
     u1_batch, u2_batch, u3_batch = [], [], []
     u1_lens, u2_lens, u3_lens = np.zeros(bt_siz, dtype=int), np.zeros(bt_siz, dtype=int), np.zeros(bt_siz, dtype=int)
@@ -37,17 +38,21 @@ def custom_collate_fn(batch):
         u3_lens[i] = cl_u3
 
     t1, t2, t3 = u1_batch, u2_batch, u3_batch
+    l_u1 = max(l_u1, 80)
+    l_u2 = max(l_u2, 80)
+    l_u3 = max(l_u3, 80)
+
     u1_batch = Variable(torch.ones(bt_siz, l_u1).long() * 10003)
     u2_batch = Variable(torch.ones(bt_siz, l_u2).long() * 10003)
     u3_batch = Variable(torch.ones(bt_siz, l_u3).long() * 10003)
 
     for i in range(bt_siz):
         seq1 = t1[i]
-        u1_batch[i, :seq1.size(0)].data.copy_(seq1)
+        u1_batch[i, :seq1.size(0)].data.copy_(seq1[:l_u1])
         seq2 = t2[i]
-        u2_batch[i, :seq2.size(0)].data.copy_(seq2)
+        u2_batch[i, :seq2.size(0)].data.copy_(seq2[:l_u2])
         seq3 = t3[i]
-        u3_batch[i, :seq3.size(0)].data.copy_(seq3)
+        u3_batch[i, :seq3.size(0)].data.copy_(seq3[:l_u3])
 
     sort1, sort2, sort3 = np.argsort(u1_lens*-1), np.argsort(u2_lens*-1), np.argsort(u3_lens*-1)
 
