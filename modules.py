@@ -16,7 +16,7 @@ class BaseEncoder(nn.Module):
                           num_layers=num_lyr, bidirectional=bidi, batch_first=True)
 
     def forward(self, x, x_lens):
-        bt_siz = x.data.size(0)
+        bt_siz = x.size(0)
         h_0 = Variable(torch.zeros(self.direction * self.num_lyr, bt_siz, self.hid_size))
         if use_cuda:
             x = x.cuda()
@@ -43,12 +43,11 @@ class SessionEncoder(nn.Module):
         h_0 = Variable(torch.zeros(self.direction * self.num_lyr, x.size(0), self.hid_size))
         if use_cuda:
             h_0 = h_0.cuda()
-
         # output, h_n for output batch is already dim 0
-        _, o = self.rnn(x, h_0)
+        _, h_n = self.rnn(x, h_0)
         # move the batch to the front of the tensor
-        o = o.view(x.size(0), -1, self.hid_size)
-        return o
+        h_n = h_n.view(x.size(0), -1, self.hid_size)
+        return h_n
 
 
 # decode the hidden state
@@ -57,7 +56,7 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()
         self.hid_size = hid_size
         self.num_lyr = num_lyr
-        self.embed = nn.Embedding(vocab_size, emb_size)  # currently the output embedding doesn't share weight
+        self.embed = nn.Embedding(vocab_size, emb_size)
         self.direction = 2 if bidi else 1
         self.lin1 = nn.Linear(ses_hid_size, hid_size)
         self.tanh = nn.Tanh()
@@ -68,7 +67,7 @@ class Decoder(nn.Module):
         self.loss_cri = nn.NLLLoss()
         self.teacher_forcing = teacher
 
-    def forward(self, ses_encoding, greedy=True, beam=5, x=None, x_lens=None):
+    def forward(self, ses_encoding, x=None, x_lens=None, greedy=True, beam=5):
         ses_encoding = self.tanh(self.lin1(ses_encoding))
         # indicator that we are doing inference
         if x is None:
@@ -161,11 +160,8 @@ class Decoder(nn.Module):
                         _, tok = torch.max(op, dim=1, keepdim=True)
                         tok = self.embed(tok)
             else:
-                # I'm directly doing teacher forcing here by feeding the true sequence via embedding layer
                 dec_o, dec_ts = self.rnn(x_emb, ses_encoding)
                 # dec_o is of size (batch, seq_len, hidden_size * num_directions)
-
-                # got a input is not contiguous error above
                 dec_o, _ = torch.nn.utils.rnn.pad_packed_sequence(dec_o, batch_first=True)
                 dec_o = self.lin2(dec_o)
                 dec_o = self.log_soft(dec_o)
