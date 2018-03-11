@@ -71,13 +71,13 @@ class Decoder(nn.Module):
         ses_encoding = self.tanh(self.lin1(ses_encoding))
         # indicator that we are doing inference
         if x is None:
-            tok = Variable(torch.ones(1, 1).long())
-            if use_cuda:
-                tok = tok.cuda()
             hid_n = ses_encoding
             if greedy:
+                tok = Variable(torch.ones(1, 1).long())
+                if use_cuda:
+                    tok = tok.cuda()
                 sent, gen_len = np.zeros((1, 10), dtype=int), 0
-                sent[:, 0] = tok.data[:, 0].numpy()
+                sent[:, 0] = tok.data[:, 0].cpu().numpy()
 
                 if use_cuda:
                     tok = tok.cuda()
@@ -91,43 +91,38 @@ class Decoder(nn.Module):
                     op = self.log_soft(op)
                     op = op.squeeze(1)
                     tok_val, tok = torch.max(op, dim=1, keepdim=True)
-                    sent[:, gen_len] = tok.data[:, 0].numpy()
+                    sent[:, gen_len] = tok.data[:, 0].cpu().numpy()
                     gen_len += 1
                 return sent
 
             else:
-                # todo change this for batch size
-                gen_len, sent = 0, np.zeros((beam, 10), dtype=int)
-                qu = list()
-                qu.append([(tok, 0)])
-                while len(qu) > 0:
-                    tok_so_far = qu.pop(0)
-                    tok, tok_score = tok_so_far[-1]
-                    tok_vec = self.embed(tok)
-                    hid_n, _ = self.rnn(tok_vec, hid_n)
-                    op = self.lin2(hid_n)
-                    op = self.log_soft(op)
-                    op = op.squeeze(1)
-                    # a matrix of size 1, 10004
-                    tok_val, tok = torch.topk(op, beam, dim=1, largest=True, sorted=False)
-                    for it in range(beam):
-                        if gen_len >= 5:
-                            continue
-                        elif len(tok_so_far) >= 10:
-                            for ir, (rt, rs) in enumerate(tok_so_far):
-                                sent[gen_len, ir] = rt.data[0, 0]
-                            gen_len += 1
-                        else:
-                            tok_so_far.append((tok[:, it].unsqueeze(1), tok_score + tok_val.data[0, it]))
-                            qu.append(copy.copy(tok_so_far))
-                            tok_so_far.pop()
+                n_candidates = []
+                candidates = [([1], 0)]
+                gen_len = 1
+                while gen_len <= 10:
+                    for c in candidates:
+                        seq, score = c[0], c[1]
+                        tok = Variable(torch.LongTensor(seq))
+                        if use_cuda:
+                            tok = tok.cuda()
+                        tok = tok.unsqueeze(0)  # batch first is True
+                        tok_vec = self.embed(tok)
+                        op, _ = self.rnn(tok_vec, hid_n)
+                        op = self.lin2(op)
+                        op = self.log_soft(op)  # this does softmax over 2nd dimension
+                        # take the hidden state of last time step
+                        op = op[:, -1, :]
+                        # a matrix of size 1, 10004
 
-                    if len(qu) > beam:
-                        # we want to maximize log likelihood
-                        qu.sort(key=lambda temp: temp[-1][1]/temp[-1][0].size(1), reverse=True)
-                        qu = qu[:beam]
+                        for i in range(op.size(1)):
+                            n_candidates.append((seq + [i], score + op.data[0, i]))
 
-                return sent
+                    n_candidates.sort(key=lambda temp: temp[1] / 1.0*len(temp[0]), reverse=True)
+                    candidates = copy.copy(n_candidates[:beam])
+                    n_candidates[:] = []
+                    gen_len += 1
+
+                return candidates
         else:
             loss = 0
             if use_cuda:
@@ -148,14 +143,15 @@ class Decoder(nn.Module):
 
                 for i in range(seq_len):
                     hid_o, hid_n = self.rnn(tok, hid_n)
-                    # hid_o (seq_len, batch, hidden_size * num_directions) batch _first affects
+                    # hid_o (seq_len, batch, hidden_size * num_directions) batch_first affects
                     # hid_n (num_layers * num_directions, batch, hidden_size)  batch_first doesn't affect
                     # h_0 (num_layers * num_directions, batch, hidden_size) batch_first doesn't affect
                     op = self.lin2(hid_o)
                     op = self.log_soft(op)
                     op = op.squeeze(1)
-                    op = op * mask[:, i].unsqueeze(1)
+                    # todo should we mask i or i+1
                     if i+1 < seq_len:
+                        op = op * mask[:, i+1].unsqueeze(1)
                         loss += self.loss_cri(op, x[:, i+1])
                         _, tok = torch.max(op, dim=1, keepdim=True)
                         tok = self.embed(tok)

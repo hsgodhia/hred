@@ -93,6 +93,7 @@ def train(options, base_enc, ses_enc, dec):
             loss.backward()
             optimizer.step()
 
+            torch.nn.utils.clip_grad_norm(all_params, 1.0)
             if i_batch % 100 == 0:
                 print('done', i_batch)
 
@@ -133,11 +134,10 @@ def main():
         ses_enc.cuda()
         dec.cuda()
 
-    train(options, base_enc, ses_enc, dec)
-    # bt_siz, test_dataset = 1, MovieTriples(data_type='train', len=5)
-    # test_dataloader = DataLoader(test_dataset, bt_siz, shuffle=False, num_workers=2, collate_fn=custom_collate_fn)
-
-    # inference_beam(test_dataloader, base_enc, ses_enc, dec, inv_dict)
+    #train(options, base_enc, ses_enc, dec)
+    bt_siz, test_dataset = 1, MovieTriples('train', 5)
+    test_dataloader = DataLoader(test_dataset, bt_siz, shuffle=False, num_workers=2, collate_fn=custom_collate_fn)
+    inference_beam(test_dataloader, base_enc, ses_enc, dec, inv_dict)
 
 
 main()

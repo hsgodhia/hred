@@ -64,12 +64,17 @@ class MovieTriples(Dataset):
         return dialog, len(dialog.u1), len(dialog.u2), len(dialog.u3)
 
 
-def tensor_to_sent(x, inv_dict):
-    sent = []
-    for i in x:
-        sent.append(inv_dict[i])
-
-    return " ".join(sent)
+def tensor_to_sent(x, inv_dict, greedy=False):
+    sents = []
+    for li in x:
+        if not greedy:
+            li = li[0]
+        sent = []
+        for i in li:
+            if i < 10003:
+                sent.append(inv_dict[i])
+        sents.append(" ".join(sent))
+    return sents
 
 
 # sample a sentence from the test set by using beam search
@@ -96,10 +101,11 @@ def inference_beam(dataloader, base_enc, ses_enc, dec, inv_dict, beam=5):
         # if we need to decode the intermediate queries we may need the hidden states
         final_session_o = ses_enc(qu_seq)
 
-        # forward(self, ses_encoding, greedy=True, beam=5, x=None, x_lens=None):
-        sent = dec(final_session_o, greedy=False)
-        # print(tensor_to_sent(sent, inv_dict))
+        # forward(self, ses_encoding, x=None, x_lens=None, greedy=True, beam=5 ):
+        sent = dec(final_session_o, None, None, greedy=False)
         print(sent)
+        # print(tensor_to_sent(sent, inv_dict))
+        print("Ground truth {}".format(tensor_to_sent(u3.data.cpu().numpy(), inv_dict, True)))
 
 
 def calc_valid_loss(data_loader, base_enc, ses_enc, dec):
