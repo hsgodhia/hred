@@ -139,8 +139,7 @@ class Decoder(nn.Module):
                 tok_vec = tok_vec.unsqueeze(1)
                 hid_n = ses_encoding
 
-                for i in range(seq_len-1):
-                    pdb.set_trace()
+                for i in range(1, seq_len):
                     hid_o, hid_n = self.rnn(tok_vec, hid_n)
                     # hid_o (seq_len, batch, hidden_size * num_directions) batch_first affects
                     # hid_n (num_layers * num_directions, batch, hidden_size)  batch_first doesn't affect
@@ -150,8 +149,9 @@ class Decoder(nn.Module):
                     op = op.squeeze(1)
                     # todo confirm mask i or i+1
                     # op = op * mask[:, i+1].unsqueeze(1)
-                    loss += self.loss_cri(op, x[:, i+1])
-                    _, tok = torch.max(op, dim=1, keepdim=True)
+                    loss += self.loss_cri(op, x[:, i])
+                    _, max_ind = torch.max(op, dim=1, keepdim=True)
+                    tok = max_ind.clone()
                     tok_vec = self.embed(tok)
             else:
                 dec_o, dec_ts = self.rnn(x_emb, ses_encoding)
@@ -164,8 +164,8 @@ class Decoder(nn.Module):
 
                 # here the dimension is N*SEQ_LEN*VOCAB_SIZE
                 # todo confirm this logic
-                for i in range(seq_len-1):
-                    loss += self.loss_cri(dec_o[:, i, :], x[:, i+1])
+                for i in range(1, seq_len):
+                    loss += self.loss_cri(dec_o[:, i-1, :], x[:, i])
 
             return loss
 
