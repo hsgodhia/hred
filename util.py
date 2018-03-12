@@ -6,9 +6,9 @@ from torch.utils.data import Dataset
 
 def cmp_dialog(d1, d2):
     if len(d1) < len(d2):
-        return -1
-    elif len(d1) > len(d2):
         return 1
+    elif len(d1) > len(d2):
+        return -1
     else:
         return 0
 
@@ -54,7 +54,7 @@ class MovieTriples(Dataset):
                 self.utterance_data.append(DialogTurn(d))
         self.utterance_data.sort(cmp=cmp_dialog)
         if length:
-            self.utterance_data = self.utterance_data[20000:20000+length]
+            self.utterance_data = self.utterance_data[80000:80000+length]
 
     def __len__(self):
         return len(self.utterance_data)
@@ -103,9 +103,10 @@ def inference_beam(dataloader, base_enc, ses_enc, dec, inv_dict, beam=5):
 
         # forward(self, ses_encoding, x=None, x_lens=None, greedy=True, beam=5 ):
         sent = dec(final_session_o, None, None, greedy=False)
-        print(sent)
-        # print(tensor_to_sent(sent, inv_dict))
-        print("Ground truth {}".format(tensor_to_sent(u3.data.cpu().numpy(), inv_dict, True)))
+        # print(sent)
+        print(tensor_to_sent(sent, inv_dict))
+        # greedy true for below because only beam generates a tuple of sequencce and probability
+        print("Ground truth {} \n".format(tensor_to_sent(u3.data.cpu().numpy(), inv_dict, True)))
 
 
 def calc_valid_loss(data_loader, base_enc, ses_enc, dec):

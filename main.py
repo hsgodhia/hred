@@ -75,7 +75,7 @@ def train(options, base_enc, ses_enc, dec):
         else:
             init.normal(param, 0, 0.01)
 
-    bt_siz, train_dataset, valid_dataset = 32, MovieTriples('train', 1000), MovieTriples('valid', 32)
+    bt_siz, train_dataset, valid_dataset = 32, MovieTriples('train', 1000), MovieTriples('train', 32)
     train_dataloader = DataLoader(train_dataset, batch_size=bt_siz, shuffle=False, num_workers=2,
                                   collate_fn=custom_collate_fn)
     valid_dataloader = DataLoader(valid_dataset, batch_size=bt_siz, shuffle=False, num_workers=2,
@@ -132,7 +132,7 @@ def main():
 
     parser = argparse.ArgumentParser(description='HRED parameter options')
     parser.add_argument('-e', dest='epoch', type=int, default=20, help='number of epochs')
-    parser.add_argument('-tc', dest='teacher', type=bool, default=True, help='default teacher forcing')
+    parser.add_argument('-tc', dest='teacher', type=bool, default=False, help='default teacher forcing')
     parser.add_argument('-bi', dest='bidi', type=bool, default=False, help='bidirectional enc/decs')
     parser.add_argument('-nl', dest='num_lyr', type=int, default=1, help='number of enc/dec layers(same for both)')
     options = parser.parse_args()

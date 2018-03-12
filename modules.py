@@ -64,7 +64,8 @@ class Decoder(nn.Module):
                           num_layers=num_lyr, bidirectional=False, batch_first=True)
         self.lin2 = nn.Linear(hid_size, vocab_size)
         self.log_soft = nn.LogSoftmax(dim=2)
-        self.loss_cri = nn.NLLLoss()
+        self.loss_cri = nn.NLLLoss(ignore_index=10003)
+        # todo confirm this flag
         self.teacher_forcing = teacher
 
     def forward(self, ses_encoding, x=None, x_lens=None, greedy=True, beam=5):
@@ -134,12 +135,13 @@ class Decoder(nn.Module):
 
             if not self.teacher_forcing:
                 # start of sentence is the first tok
-                tok = Variable(self.embed.weight.data[1, :].repeat(siz, 1))
-                tok = tok.unsqueeze(1)
+                tok_vec = Variable(self.embed.weight.data[1, :].repeat(siz, 1))
+                tok_vec = tok_vec.unsqueeze(1)
                 hid_n = ses_encoding
 
                 for i in range(seq_len-1):
-                    hid_o, hid_n = self.rnn(tok, hid_n)
+                    pdb.set_trace()
+                    hid_o, hid_n = self.rnn(tok_vec, hid_n)
                     # hid_o (seq_len, batch, hidden_size * num_directions) batch_first affects
                     # hid_n (num_layers * num_directions, batch, hidden_size)  batch_first doesn't affect
                     # h_0 (num_layers * num_directions, batch, hidden_size) batch_first doesn't affect
@@ -147,17 +149,18 @@ class Decoder(nn.Module):
                     op = self.log_soft(op)
                     op = op.squeeze(1)
                     # todo confirm mask i or i+1
-                    op = op * mask[:, i+1].unsqueeze(1)
+                    # op = op * mask[:, i+1].unsqueeze(1)
                     loss += self.loss_cri(op, x[:, i+1])
                     _, tok = torch.max(op, dim=1, keepdim=True)
-                    tok = self.embed(tok)
+                    tok_vec = self.embed(tok)
             else:
                 dec_o, dec_ts = self.rnn(x_emb, ses_encoding)
+
                 # dec_o is of size (batch, seq_len, hidden_size * num_directions)
                 dec_o, _ = torch.nn.utils.rnn.pad_packed_sequence(dec_o, batch_first=True)
                 dec_o = self.lin2(dec_o)
                 dec_o = self.log_soft(dec_o)
-                dec_o = dec_o * mask.unsqueeze(2)
+                # dec_o = dec_o * mask.unsqueeze(2)
 
                 # here the dimension is N*SEQ_LEN*VOCAB_SIZE
                 # todo confirm this logic
