@@ -79,9 +79,6 @@ class Decoder(nn.Module):
                 sent, gen_len = np.zeros((1, 10), dtype=int), 0
                 sent[:, 0] = tok.data[:, 0].cpu().numpy()
 
-                if use_cuda:
-                    tok = tok.cuda()
-
                 while True:
                     if gen_len >= 10 or tok.data[0, 0] == 2:
                         break
@@ -116,8 +113,8 @@ class Decoder(nn.Module):
 
                         for i in range(op.size(1)):
                             n_candidates.append((seq + [i], score + op.data[0, i]))
-
-                    n_candidates.sort(key=lambda temp: temp[1] / 1.0*len(temp[0]), reverse=True)
+                    # hack to exponent sequence length by alpha-0.7
+                    n_candidates.sort(key=lambda temp: temp[1] / (1.0*len(temp[0])**0.7), reverse=True)
                     candidates = copy.copy(n_candidates[:beam])
                     n_candidates[:] = []
                     gen_len += 1
@@ -141,7 +138,7 @@ class Decoder(nn.Module):
                 tok = tok.unsqueeze(1)
                 hid_n = ses_encoding
 
-                for i in range(seq_len):
+                for i in range(seq_len-1):
                     hid_o, hid_n = self.rnn(tok, hid_n)
                     # hid_o (seq_len, batch, hidden_size * num_directions) batch_first affects
                     # hid_n (num_layers * num_directions, batch, hidden_size)  batch_first doesn't affect
@@ -149,12 +146,11 @@ class Decoder(nn.Module):
                     op = self.lin2(hid_o)
                     op = self.log_soft(op)
                     op = op.squeeze(1)
-                    # todo should we mask i or i+1
-                    if i+1 < seq_len:
-                        op = op * mask[:, i+1].unsqueeze(1)
-                        loss += self.loss_cri(op, x[:, i+1])
-                        _, tok = torch.max(op, dim=1, keepdim=True)
-                        tok = self.embed(tok)
+                    # todo confirm mask i or i+1
+                    op = op * mask[:, i+1].unsqueeze(1)
+                    loss += self.loss_cri(op, x[:, i+1])
+                    _, tok = torch.max(op, dim=1, keepdim=True)
+                    tok = self.embed(tok)
             else:
                 dec_o, dec_ts = self.rnn(x_emb, ses_encoding)
                 # dec_o is of size (batch, seq_len, hidden_size * num_directions)
@@ -162,9 +158,11 @@ class Decoder(nn.Module):
                 dec_o = self.lin2(dec_o)
                 dec_o = self.log_soft(dec_o)
                 dec_o = dec_o * mask.unsqueeze(2)
+
                 # here the dimension is N*SEQ_LEN*VOCAB_SIZE
-                for i in range(seq_len):
-                    loss += self.loss_cri(dec_o[:, i, :], x[:, i])
+                # todo confirm this logic
+                for i in range(seq_len-1):
+                    loss += self.loss_cri(dec_o[:, i, :], x[:, i+1])
 
             return loss
 

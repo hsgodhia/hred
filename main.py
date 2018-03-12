@@ -17,11 +17,17 @@ if use_cuda:
 def custom_collate_fn(batch):
     # todo default truncates sequence till 80 words and <pad> is 10003
     bt_siz = len(batch)
+    pad_idx, max_seq_len = 10003, 120
+
     u1_batch, u2_batch, u3_batch = [], [], []
     u1_lens, u2_lens, u3_lens = np.zeros(bt_siz, dtype=int), np.zeros(bt_siz, dtype=int), np.zeros(bt_siz, dtype=int)
 
     l_u1, l_u2, l_u3 = 0, 0, 0
     for i, (d, cl_u1, cl_u2, cl_u3) in enumerate(batch):
+        cl_u1 = min(cl_u1, max_seq_len)
+        cl_u2 = min(cl_u2, max_seq_len)
+        cl_u3 = min(cl_u3, max_seq_len)
+
         if cl_u1 > l_u1:
             l_u1 = cl_u1
         u1_batch.append(torch.LongTensor(d.u1))
@@ -38,13 +44,10 @@ def custom_collate_fn(batch):
         u3_lens[i] = cl_u3
 
     t1, t2, t3 = u1_batch, u2_batch, u3_batch
-    l_u1 = max(l_u1, 80)
-    l_u2 = max(l_u2, 80)
-    l_u3 = max(l_u3, 80)
 
-    u1_batch = Variable(torch.ones(bt_siz, l_u1).long() * 10003)
-    u2_batch = Variable(torch.ones(bt_siz, l_u2).long() * 10003)
-    u3_batch = Variable(torch.ones(bt_siz, l_u3).long() * 10003)
+    u1_batch = Variable(torch.ones(bt_siz, l_u1).long() * pad_idx)
+    u2_batch = Variable(torch.ones(bt_siz, l_u2).long() * pad_idx)
+    u3_batch = Variable(torch.ones(bt_siz, l_u3).long() * pad_idx)
 
     for i in range(bt_siz):
         seq1 = t1[i]
@@ -81,7 +84,7 @@ def train(options, base_enc, ses_enc, dec):
     print("Training set {} Validation set {}".format(len(train_dataset), len(valid_dataset)))
 
     optimizer = optim.Adam(all_params)
-    for i in range(options.e):
+    for i in range(options.epoch):
         tr_loss = 0
         strt = time.time()
         for i_batch, sample_batch in enumerate(train_dataloader):
@@ -105,7 +108,7 @@ def train(options, base_enc, ses_enc, dec):
         vl_loss = calc_valid_loss(valid_dataloader, base_enc, ses_enc, dec)
         print("Training loss {} Valid loss {} ".format(tr_loss/(1 + i_batch), vl_loss))
         print("epoch {} took {}".format(i+1, (time.time() - strt)/3600.0))
-        if i % 2 == 0 or i == options.e-1:
+        if i % 2 == 0 or i == options.epoch -1:
             torch.save(base_enc.state_dict(), 'enc_mdl.pth')
             torch.save(ses_enc.state_dict(), 'ses_mdl.pth')
             torch.save(dec.state_dict(), 'dec_mdl.pth')
@@ -113,6 +116,8 @@ def train(options, base_enc, ses_enc, dec):
 
 
 def main():
+    print('torch version {}'.format(torch.__version__))
+
     # we use a common dict for all test, train and validation
     _dict_file = '/home/harshal/code/research/hred/data/MovieTriples_Dataset/Training.dict.pkl'
     with open(_dict_file, 'rb') as fp2:
@@ -121,26 +126,29 @@ def main():
     # so i believe that the first is the ids are assigned by frequency
     # thinking to use a counter collection out here maybe
     inv_dict = {}
-    dict = {}
     for x in dict_data:
         tok, f, _, _ = x
-        dict[tok] = f
         inv_dict[f] = tok
 
     parser = argparse.ArgumentParser(description='HRED parameter options')
-    parser.add_argument('-e', dest='e', type=int, default=15, help='number of epochs')
+    parser.add_argument('-e', dest='epoch', type=int, default=20, help='number of epochs')
+    parser.add_argument('-tc', dest='teacher', type=bool, default=True, help='default teacher forcing')
+    parser.add_argument('-bi', dest='bidi', type=bool, default=False, help='bidirectional enc/decs')
+    parser.add_argument('-nl', dest='num_lyr', type=int, default=1, help='number of enc/dec layers(same for both)')
     options = parser.parse_args()
+    print(options)
 
-    base_enc = BaseEncoder(10004, 300, 1000, 1, False)
-    ses_enc = SessionEncoder(1500, 1000, 1, False)
-    dec = Decoder(10004, 300, 1500, 1000, 1, False, True)
+    base_enc = BaseEncoder(10004, 300, 1000, options.num_lyr, options.bidi)
+    ses_enc = SessionEncoder(1500, 1000, options.num_lyr, options.bidi)
+    dec = Decoder(10004, 300, 1500, 1000, options.num_lyr, options.bidi, options.teacher)
     if use_cuda:
         base_enc.cuda()
         ses_enc.cuda()
         dec.cuda()
 
-    #train(options, base_enc, ses_enc, dec)
-    bt_siz, test_dataset = 1, MovieTriples('train', 5)
+    train(options, base_enc, ses_enc, dec)
+    # chooses 10 examples only
+    bt_siz, test_dataset = 1, MovieTriples('test', 10)
     test_dataloader = DataLoader(test_dataset, bt_siz, shuffle=False, num_workers=2, collate_fn=custom_collate_fn)
     inference_beam(test_dataloader, base_enc, ses_enc, dec, inv_dict)
 
