@@ -3,6 +3,8 @@ import copy
 import pickle
 from torch.utils.data import Dataset
 
+use_cuda = torch.cuda.is_available()
+
 
 def cmp_to_key(mycmp):
     'Convert a cmp= function into a key= function'
@@ -32,9 +34,9 @@ def cmp_to_key(mycmp):
 
 def cmp_dialog(d1, d2):
     if len(d1) < len(d2):
-        return -1
-    elif len(d1) > len(d2):
         return 1
+    elif len(d1) > len(d2):
+        return -1
     else:
         return 0
 
@@ -127,15 +129,15 @@ def inference_beam(dataloader, base_enc, ses_enc, dec, inv_dict, beam=5):
         # if we need to decode the intermediate queries we may need the hidden states
         final_session_o = ses_enc(qu_seq)
 
-        # forward(self, ses_encoding, x=None, x_lens=None, greedy=True, beam=5 ):
-        sent = dec(final_session_o, None, None, greedy=False)
+        # forward(self, ses_encoding, x=None, x_lens=None, beam=5 ):
+        sent = dec(final_session_o, None, None)
         # print(sent)
         print(tensor_to_sent(sent, inv_dict))
         # greedy true for below because only beam generates a tuple of sequence and probability
         print("Ground truth {} \n".format(tensor_to_sent(u3.data.cpu().numpy(), inv_dict, True)))
 
 
-def calc_valid_loss(data_loader, base_enc, ses_enc, dec):
+def calc_valid_loss(data_loader, criteria, base_enc, ses_enc, dec):
     base_enc.eval()
     ses_enc.eval()
     dec.eval()
@@ -148,7 +150,17 @@ def calc_valid_loss(data_loader, base_enc, ses_enc, dec):
         o1, o2 = base_enc(u1, u1_lens), base_enc(u2, u2_lens)
         qu_seq = torch.cat((o1, o2), 1)
         final_session_o = ses_enc(qu_seq)
-        loss = dec(final_session_o, u3, u3_lens)
+
+        preds = dec(final_session_o, u3, u3_lens)
+        preds = preds.view(-1, preds.size(2))
+        # of size (N, SEQLEN, DIM)
+        if use_cuda:
+            u3 = u3.cuda()
+
+        u3 = u3.view(-1)
+        loss = criteria(preds, u3)
+
+        loss = loss / u3.ne(10003).long().sum().data[0]
         valid_loss += loss.data[0]
 
     base_enc.train()

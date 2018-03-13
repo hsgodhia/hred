@@ -84,6 +84,11 @@ def train(options, base_enc, ses_enc, dec):
     print("Training set {} Validation set {}".format(len(train_dataset), len(valid_dataset)))
 
     optimizer = optim.Adam(all_params)
+    criteria = nn.CrossEntropyLoss(ignore_index=10003, size_average=False)
+
+    if use_cuda:
+        criteria.cuda()
+
     for i in range(options.epoch):
         tr_loss = 0
         strt = time.time()
@@ -93,8 +98,16 @@ def train(options, base_enc, ses_enc, dec):
             o1, o2 = base_enc(u1, u1_lens), base_enc(u2, u2_lens)
             qu_seq = torch.cat((o1, o2), 1)
             final_session_o = ses_enc(qu_seq)
-            loss = dec(final_session_o, u3, u3_lens)
-            # (self, ses_encoding, greedy=True, beam=5, x=None, x_lens=None)
+            preds = dec(final_session_o, u3, u3_lens)
+            preds = preds.view(-1, preds.size(2))
+            # of size (N, SEQLEN, DIM)
+            if use_cuda:
+                u3 = u3.cuda()
+
+            u3 = u3.view(-1)
+            loss = criteria(preds, u3)
+
+            loss = loss / u3.ne(10003).long().sum().data[0]
             tr_loss += loss.data[0]
 
             optimizer.zero_grad()
@@ -105,7 +118,7 @@ def train(options, base_enc, ses_enc, dec):
             if i_batch % 100 == 0:
                 print('done', i_batch)
 
-        vl_loss = calc_valid_loss(valid_dataloader, base_enc, ses_enc, dec)
+        vl_loss = calc_valid_loss(valid_dataloader, criteria, base_enc, ses_enc, dec)
         print("Training loss {} Valid loss {} ".format(tr_loss/(1 + i_batch), vl_loss))
         print("epoch {} took {}".format(i+1, (time.time() - strt)/3600.0))
         if i % 2 == 0 or i == options.epoch -1:
@@ -146,7 +159,7 @@ def main():
         ses_enc.cuda()
         dec.cuda()
 
-    # train(options, base_enc, ses_enc, dec)
+    train(options, base_enc, ses_enc, dec)
     # chooses 10 examples only
     bt_siz, test_dataset = 1, MovieTriples('test', 10)
     test_dataloader = DataLoader(test_dataset, bt_siz, shuffle=False, num_workers=2, collate_fn=custom_collate_fn)
