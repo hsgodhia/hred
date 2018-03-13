@@ -146,7 +146,7 @@ def main():
         ses_enc.cuda()
         dec.cuda()
 
-    train(options, base_enc, ses_enc, dec)
+    # train(options, base_enc, ses_enc, dec)
     # chooses 10 examples only
     bt_siz, test_dataset = 1, MovieTriples('test', 10)
     test_dataloader = DataLoader(test_dataset, bt_siz, shuffle=False, num_workers=2, collate_fn=custom_collate_fn)

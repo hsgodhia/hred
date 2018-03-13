@@ -3,6 +3,23 @@ from torch.autograd import Variable
 use_cuda = torch.cuda.is_available()
 
 
+def max_out(x):
+    # make sure s2 is even and that the input is 2 dimension
+    if len(x.size()) == 2:
+        s1, s2 = x.size()
+        x = x.unsqueeze(1)
+        x = x.view(s1, s2 / 2, 2)
+        x, _ = torch.max(x, 2)
+
+    elif len(x.size()) == 3:
+        s1, s2, s3 = x.size()
+        x = x.unsqueeze(1)
+        x = x.view(s1, s2, s3/2, 2)
+        x, _ = torch.max(x, 3)
+
+    return x
+
+
 # encode each sentence utterance into a single vector
 class BaseEncoder(nn.Module):
     def __init__(self, vocab_size, emb_size, hid_size, num_lyr, bidi):
@@ -54,18 +71,23 @@ class SessionEncoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, vocab_size, emb_size, ses_hid_size, hid_size, num_lyr=1, bidi=False, teacher=True):
         super(Decoder, self).__init__()
+        self.emb_size = emb_size
         self.hid_size = hid_size
         self.num_lyr = num_lyr
-        self.embed = nn.Embedding(vocab_size, emb_size)
-        self.direction = 2 if bidi else 1
-        self.lin1 = nn.Linear(ses_hid_size, hid_size)
+
         self.tanh = nn.Tanh()
+        self.in_embed = nn.Embedding(vocab_size, emb_size, padding_idx=10003, sparse=False)
         self.rnn = nn.GRU(dropout=0.2, hidden_size=hid_size, input_size=emb_size,
                           num_layers=num_lyr, bidirectional=False, batch_first=True)
-        self.lin2 = nn.Linear(hid_size, vocab_size)
-        self.log_soft = nn.LogSoftmax(dim=2)
-        self.loss_cri = nn.NLLLoss(ignore_index=10003)
-        # todo confirm this flag
+
+        self.lin1 = nn.Linear(ses_hid_size, hid_size)
+        self.lin4 = nn.Linear(hid_size, emb_size)
+        self.out_embed = nn.Linear(emb_size / 2, vocab_size, False)
+
+        self.log_soft2 = nn.LogSoftmax(dim=2)
+        self.loss_cri = nn.NLLLoss(ignore_index=10003, reduce=False)
+
+        self.direction = 2 if bidi else 1
         self.teacher_forcing = teacher
 
     def forward(self, ses_encoding, x=None, x_lens=None, greedy=True, beam=5):
@@ -83,11 +105,15 @@ class Decoder(nn.Module):
                 while True:
                     if gen_len >= 10 or tok.data[0, 0] == 2:
                         break
-                    tok_vec = self.embed(tok)
+                    tok_vec = self.in_embed(tok)
                     hid_n, _ = self.rnn(tok_vec, hid_n)
-                    op = self.lin2(hid_n)
-                    op = self.log_soft(op)
+
+                    op = self.lin4(hid_n) + tok_vec
+                    op = max_out(op)
+                    op = self.out_embed(op)
+                    op = self.log_soft2(op)
                     op = op.squeeze(1)
+
                     tok_val, tok = torch.max(op, dim=1, keepdim=True)
                     sent[:, gen_len] = tok.data[:, 0].cpu().numpy()
                     gen_len += 1
@@ -104,10 +130,12 @@ class Decoder(nn.Module):
                         if use_cuda:
                             tok = tok.cuda()
                         tok = tok.unsqueeze(0)  # batch first is True
-                        tok_vec = self.embed(tok)
-                        op, _ = self.rnn(tok_vec, hid_n)
-                        op = self.lin2(op)
-                        op = self.log_soft(op)  # this does softmax over 2nd dimension
+                        tok_vec = self.in_embed(tok)
+                        hid_o, _ = self.rnn(tok_vec, hid_n)
+                        hid_o = self.lin4(hid_o) + tok_vec
+                        op = max_out(hid_o)
+                        op = self.out_embed(op)
+                        op = self.log_soft2(op)
                         # take the hidden state of last time step
                         op = op[:, -1, :]
                         # a matrix of size 1, 10004
@@ -123,50 +151,46 @@ class Decoder(nn.Module):
                 return candidates
         else:
             loss = 0
-            if use_cuda:
-                x = x.cuda()
-            siz, seq_len = x.size(0), x.size(1)
             mask = x < 10003
             mask = mask.float()
-
-            x_emb = self.embed(x)
-            x_emb = torch.nn.utils.rnn.pack_padded_sequence(x_emb, x_lens, batch_first=True)
+            siz, seq_len = x.size(0), x.size(1)
             ses_encoding = ses_encoding.view(self.num_lyr*self.direction, siz, self.hid_size)
-
             if not self.teacher_forcing:
+                tok = Variable(torch.ones(siz, 1).long())
+                if use_cuda:
+                    tok = tok.cuda()
                 # start of sentence is the first tok
-                tok_vec = Variable(self.embed.weight.data[1, :].repeat(siz, 1))
-                tok_vec = tok_vec.unsqueeze(1)
                 hid_n = ses_encoding
-
                 for i in range(1, seq_len):
+                    tok_vec = self.in_embed(tok)
                     hid_o, hid_n = self.rnn(tok_vec, hid_n)
                     # hid_o (seq_len, batch, hidden_size * num_directions) batch_first affects
                     # hid_n (num_layers * num_directions, batch, hidden_size)  batch_first doesn't affect
                     # h_0 (num_layers * num_directions, batch, hidden_size) batch_first doesn't affect
-                    op = self.lin2(hid_o)
-                    op = self.log_soft(op)
-                    op = op.squeeze(1)
-                    # todo confirm mask i or i+1
-                    # op = op * mask[:, i+1].unsqueeze(1)
+                    hid_o = self.lin4(hid_o) + tok_vec
+                    hid_o = max_out(hid_o)
+                    hid_o = self.out_embed(hid_o)
+                    op = self.log_soft2(hid_o)
+                    op = op[:, -1, :]
                     loss += self.loss_cri(op, x[:, i])
                     _, max_ind = torch.max(op, dim=1, keepdim=True)
                     tok = max_ind.clone()
-                    tok_vec = self.embed(tok)
             else:
-                dec_o, dec_ts = self.rnn(x_emb, ses_encoding)
-
+                x_emb = self.in_embed(x)
+                x_emb_pack = torch.nn.utils.rnn.pack_padded_sequence(x_emb, x_lens, batch_first=True)
+                dec_o, dec_ts = self.rnn(x_emb_pack, ses_encoding)
                 # dec_o is of size (batch, seq_len, hidden_size * num_directions)
                 dec_o, _ = torch.nn.utils.rnn.pad_packed_sequence(dec_o, batch_first=True)
-                dec_o = self.lin2(dec_o)
-                dec_o = self.log_soft(dec_o)
-                # dec_o = dec_o * mask.unsqueeze(2)
-
-                # here the dimension is N*SEQ_LEN*VOCAB_SIZE
-                # todo confirm this logic
+                dec_o = self.lin4(dec_o) + x_emb  # padding index is embedded to 0 doesn't spoil the addition
+                dec_o = max_out(dec_o)
+                dec_o = self.out_embed(dec_o)
+                dec_o = self.log_soft2(dec_o)
                 for i in range(1, seq_len):
                     loss += self.loss_cri(dec_o[:, i-1, :], x[:, i])
 
+            loss = loss / torch.sum(mask, 1)
+            loss = torch.mean(loss)
+            # normalize by temporal length and batch size
             return loss
 
     def set_teacher_forcing(self, val):

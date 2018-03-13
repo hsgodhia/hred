@@ -4,11 +4,37 @@ import pickle
 from torch.utils.data import Dataset
 
 
+def cmp_to_key(mycmp):
+    'Convert a cmp= function into a key= function'
+    class K(object):
+        def __init__(self, obj, *args):
+            self.obj = obj
+
+        def __lt__(self, other):
+            return mycmp(self.obj, other.obj) < 0
+
+        def __gt__(self, other):
+            return mycmp(self.obj, other.obj) > 0
+
+        def __eq__(self, other):
+            return mycmp(self.obj, other.obj) == 0
+
+        def __le__(self, other):
+            return mycmp(self.obj, other.obj) <= 0
+
+        def __ge__(self, other):
+            return mycmp(self.obj, other.obj) >= 0
+
+        def __ne__(self, other):
+            return mycmp(self.obj, other.obj) != 0
+    return K
+
+
 def cmp_dialog(d1, d2):
     if len(d1) < len(d2):
-        return 1
-    elif len(d1) > len(d2):
         return -1
+    elif len(d1) > len(d2):
+        return 1
     else:
         return 0
 
@@ -52,9 +78,9 @@ class MovieTriples(Dataset):
             data = pickle.load(fp)
             for d in data:
                 self.utterance_data.append(DialogTurn(d))
-        self.utterance_data.sort(cmp=cmp_dialog)
+        self.utterance_data.sort(key=cmp_to_key(cmp_dialog))
         if length:
-            self.utterance_data = self.utterance_data[80000:80000+length]
+            self.utterance_data = self.utterance_data[:length]
 
     def __len__(self):
         return len(self.utterance_data)
@@ -105,7 +131,7 @@ def inference_beam(dataloader, base_enc, ses_enc, dec, inv_dict, beam=5):
         sent = dec(final_session_o, None, None, greedy=False)
         # print(sent)
         print(tensor_to_sent(sent, inv_dict))
-        # greedy true for below because only beam generates a tuple of sequencce and probability
+        # greedy true for below because only beam generates a tuple of sequence and probability
         print("Ground truth {} \n".format(tensor_to_sent(u3.data.cpu().numpy(), inv_dict, True)))
 
 
