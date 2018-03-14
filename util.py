@@ -2,8 +2,74 @@ import torch
 import copy
 import pickle
 from torch.utils.data import Dataset
-
+from torch.autograd import Variable
+import numpy as np
 use_cuda = torch.cuda.is_available()
+
+
+def custom_collate_fn(batch):
+    # input is a list of dialogturn objects
+    bt_siz = len(batch)
+    pad_idx, max_seq_len = 10003, 120
+
+    u1_batch, u2_batch, u3_batch = [], [], []
+    u1_lens, u2_lens, u3_lens = np.zeros(bt_siz, dtype=int), np.zeros(bt_siz, dtype=int), np.zeros(bt_siz, dtype=int)
+
+    # these store the max sequence lengths for the batch
+    l_u1, l_u2, l_u3 = 0, 0, 0
+    for i, (d, cl_u1, cl_u2, cl_u3) in enumerate(batch):
+        cl_u1 = min(cl_u1, max_seq_len)
+        cl_u2 = min(cl_u2, max_seq_len)
+        cl_u3 = min(cl_u3, max_seq_len)
+
+        if cl_u1 > l_u1:
+            l_u1 = cl_u1
+        u1_batch.append(torch.LongTensor(d.u1))
+        u1_lens[i] = cl_u1
+
+        if cl_u2 > l_u2:
+            l_u2 = cl_u2
+        u2_batch.append(torch.LongTensor(d.u2))
+        u2_lens[i] = cl_u2
+
+        if cl_u3 > l_u3:
+            l_u3 = cl_u3
+        u3_batch.append(torch.LongTensor(d.u3))
+        u3_lens[i] = cl_u3
+
+    t1, t2, t3 = u1_batch, u2_batch, u3_batch
+
+    u1_batch = Variable(torch.ones(bt_siz, l_u1).long() * pad_idx, requires_grad=False)
+    u2_batch = Variable(torch.ones(bt_siz, l_u2).long() * pad_idx, requires_grad=False)
+    u3_batch = Variable(torch.ones(bt_siz, l_u3).long() * pad_idx, requires_grad=False)
+    end_tok = torch.LongTensor([2])
+
+    for i in range(bt_siz):
+        seq1, cur1_l = t1[i], t1[i].size(0)
+        if cur1_l <= l_u1:
+            u1_batch[i, :cur1_l].data.copy_(seq1[:cur1_l])
+        else:
+            u1_batch[i, :].data.copy_(torch.cat((seq1[:l_u1-1], end_tok), 0))
+
+        seq2, cur2_l = t2[i], t2[i].size(0)
+        if cur2_l <= l_u2:
+            u2_batch[i, :cur2_l].data.copy_(seq2[:cur2_l])
+        else:
+            u2_batch[i, :].data.copy_(torch.cat((seq2[:l_u2-1], end_tok), 0))
+
+        seq3, cur3_l = t3[i], t3[i].size(0)
+        if cur3_l <= l_u3:
+            u3_batch[i, :cur3_l].data.copy_(seq3[:cur3_l])
+        else:
+            u3_batch[i, :].data.copy_(torch.cat((seq3[:l_u3-1], end_tok), 0))
+
+    sort1, sort2, sort3 = np.argsort(u1_lens*-1), np.argsort(u2_lens*-1), np.argsort(u3_lens*-1)
+    if use_cuda:
+        u1_batch = u1_batch.cuda()
+        u2_batch = u2_batch.cuda()
+        u3_batch = u3_batch.cuda()
+
+    return u1_batch[sort1, :], u1_lens[sort1], u2_batch[sort2, :], u2_lens[sort2], u3_batch[sort3, :], u3_lens[sort3]
 
 
 def cmp_to_key(mycmp):
@@ -105,68 +171,3 @@ def tensor_to_sent(x, inv_dict, greedy=False):
                 break
         sents.append(" ".join(sent))
     return sents
-
-
-# sample a sentence from the test set by using beam search
-def inference_beam(dataloader, base_enc, ses_enc, dec, inv_dict, beam=5):
-    saved_state = torch.load("enc_mdl.pth")
-    base_enc.load_state_dict(saved_state)
-
-    saved_state = torch.load("ses_mdl.pth")
-    ses_enc.load_state_dict(saved_state)
-
-    saved_state = torch.load("dec_mdl.pth")
-    dec.load_state_dict(saved_state)
-
-    base_enc.eval()
-    ses_enc.eval()
-    dec.eval()
-
-    for i_batch, sample_batch in enumerate(dataloader):
-        u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3], \
-                                                sample_batch[4], sample_batch[5]
-        o1, o2 = base_enc(u1, u1_lens), base_enc(u2, u2_lens)
-        qu_seq = torch.cat((o1, o2), 1)
-
-        # if we need to decode the intermediate queries we may need the hidden states
-        final_session_o = ses_enc(qu_seq)
-
-        # forward(self, ses_encoding, x=None, x_lens=None, beam=5 ):
-        sent = dec(final_session_o, None, None)
-        # print(sent)
-        print(tensor_to_sent(sent, inv_dict))
-        # greedy true for below because only beam generates a tuple of sequence and probability
-        print("Ground truth {} \n".format(tensor_to_sent(u3.data.cpu().numpy(), inv_dict, True)))
-
-
-def calc_valid_loss(data_loader, criteria, base_enc, ses_enc, dec):
-    base_enc.eval()
-    ses_enc.eval()
-    dec.eval()
-
-    valid_loss = 0
-    for i_batch, sample_batch in enumerate(data_loader):
-        u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3], \
-                                                sample_batch[4], sample_batch[5]
-
-        o1, o2 = base_enc(u1, u1_lens), base_enc(u2, u2_lens)
-        qu_seq = torch.cat((o1, o2), 1)
-        final_session_o = ses_enc(qu_seq)
-
-        preds = dec(final_session_o, u3, u3_lens)
-        preds = preds.view(-1, preds.size(2))
-        # of size (N, SEQLEN, DIM)
-        if use_cuda:
-            u3 = u3.cuda()
-
-        u3 = u3.view(-1)
-        loss = criteria(preds, u3)
-
-        loss = loss / u3.ne(10003).long().sum().data[0]
-        valid_loss += loss.data[0]
-
-    base_enc.train()
-    ses_enc.train()
-    dec.train()
-
-    return valid_loss/(1 + i_batch)

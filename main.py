@@ -14,54 +14,6 @@ if use_cuda:
     torch.cuda.manual_seed(123)
 
 
-def custom_collate_fn(batch):
-    # todo default truncates sequence till 80 words and <pad> is 10003
-    bt_siz = len(batch)
-    pad_idx, max_seq_len = 10003, 120
-
-    u1_batch, u2_batch, u3_batch = [], [], []
-    u1_lens, u2_lens, u3_lens = np.zeros(bt_siz, dtype=int), np.zeros(bt_siz, dtype=int), np.zeros(bt_siz, dtype=int)
-
-    l_u1, l_u2, l_u3 = 0, 0, 0
-    for i, (d, cl_u1, cl_u2, cl_u3) in enumerate(batch):
-        cl_u1 = min(cl_u1, max_seq_len)
-        cl_u2 = min(cl_u2, max_seq_len)
-        cl_u3 = min(cl_u3, max_seq_len)
-
-        if cl_u1 > l_u1:
-            l_u1 = cl_u1
-        u1_batch.append(torch.LongTensor(d.u1))
-        u1_lens[i] = cl_u1
-
-        if cl_u2 > l_u2:
-            l_u2 = cl_u2
-        u2_batch.append(torch.LongTensor(d.u2))
-        u2_lens[i] = cl_u2
-
-        if cl_u3 > l_u3:
-            l_u3 = cl_u3
-        u3_batch.append(torch.LongTensor(d.u3))
-        u3_lens[i] = cl_u3
-
-    t1, t2, t3 = u1_batch, u2_batch, u3_batch
-
-    u1_batch = Variable(torch.ones(bt_siz, l_u1).long() * pad_idx)
-    u2_batch = Variable(torch.ones(bt_siz, l_u2).long() * pad_idx)
-    u3_batch = Variable(torch.ones(bt_siz, l_u3).long() * pad_idx)
-
-    for i in range(bt_siz):
-        seq1 = t1[i]
-        u1_batch[i, :seq1.size(0)].data.copy_(seq1[:l_u1])
-        seq2 = t2[i]
-        u2_batch[i, :seq2.size(0)].data.copy_(seq2[:l_u2])
-        seq3 = t3[i]
-        u3_batch[i, :seq3.size(0)].data.copy_(seq3[:l_u3])
-
-    sort1, sort2, sort3 = np.argsort(u1_lens*-1), np.argsort(u2_lens*-1), np.argsort(u3_lens*-1)
-
-    return u1_batch[sort1, :], u1_lens[sort1].tolist(), u2_batch[sort2, :], u2_lens[sort2].tolist(), u3_batch[sort3, :], u3_lens[sort3].tolist()
-
-
 def train(options, base_enc, ses_enc, dec):
     base_enc.train()
     ses_enc.train()
@@ -75,10 +27,10 @@ def train(options, base_enc, ses_enc, dec):
         else:
             init.normal(param, 0, 0.01)
 
-    bt_siz, train_dataset, valid_dataset = 32, MovieTriples('train', 1000), MovieTriples('train', 32)
-    train_dataloader = DataLoader(train_dataset, batch_size=bt_siz, shuffle=False, num_workers=2,
+    train_dataset, valid_dataset = MovieTriples('train', 1000), MovieTriples('train', 32)
+    train_dataloader = DataLoader(train_dataset, batch_size=options.bt_siz, shuffle=False, num_workers=2,
                                   collate_fn=custom_collate_fn)
-    valid_dataloader = DataLoader(valid_dataset, batch_size=bt_siz, shuffle=False, num_workers=2,
+    valid_dataloader = DataLoader(valid_dataset, batch_size=options.bt_siz, shuffle=False, num_workers=2,
                                   collate_fn=custom_collate_fn)
 
     print("Training set {} Validation set {}".format(len(train_dataset), len(valid_dataset)))
@@ -100,9 +52,6 @@ def train(options, base_enc, ses_enc, dec):
             final_session_o = ses_enc(qu_seq)
             preds = dec(final_session_o, u3, u3_lens)  # of size (N, SEQLEN, DIM)
             preds = preds[:, :-1, :].contiguous().view(-1, preds.size(2))
-
-            if use_cuda:
-                u3 = u3.cuda()
 
             u3 = u3[:, 1:].contiguous().view(-1)
             loss = criteria(preds, u3)
@@ -128,6 +77,68 @@ def train(options, base_enc, ses_enc, dec):
             torch.save(optimizer.state_dict(), 'opti_st.pth')
 
 
+# sample a sentence from the test set by using beam search
+def inference_beam(dataloader, base_enc, ses_enc, dec, inv_dict, beam=5):
+    saved_state = torch.load("enc_mdl.pth")
+    base_enc.load_state_dict(saved_state)
+
+    saved_state = torch.load("ses_mdl.pth")
+    ses_enc.load_state_dict(saved_state)
+
+    saved_state = torch.load("dec_mdl.pth")
+    dec.load_state_dict(saved_state)
+
+    base_enc.eval()
+    ses_enc.eval()
+    dec.eval()
+
+    for i_batch, sample_batch in enumerate(dataloader):
+        u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3], \
+                                                sample_batch[4], sample_batch[5]
+        o1, o2 = base_enc(u1, u1_lens), base_enc(u2, u2_lens)
+        qu_seq = torch.cat((o1, o2), 1)
+
+        # if we need to decode the intermediate queries we may need the hidden states
+        final_session_o = ses_enc(qu_seq)
+
+        # forward(self, ses_encoding, x=None, x_lens=None, beam=5 ):
+        sent = dec(final_session_o, None, None)
+        # print(sent)
+        print(tensor_to_sent(sent, inv_dict))
+        # greedy true for below because only beam generates a tuple of sequence and probability
+        print("Ground truth {} \n".format(tensor_to_sent(u3.data.cpu().numpy(), inv_dict, True)))
+
+
+def calc_valid_loss(data_loader, criteria, base_enc, ses_enc, dec):
+    base_enc.eval()
+    ses_enc.eval()
+    dec.eval()
+
+    valid_loss = 0
+    for i_batch, sample_batch in enumerate(data_loader):
+        u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3], \
+                                                sample_batch[4], sample_batch[5]
+
+        o1, o2 = base_enc(u1, u1_lens), base_enc(u2, u2_lens)
+        qu_seq = torch.cat((o1, o2), 1)
+        final_session_o = ses_enc(qu_seq)
+
+        preds = dec(final_session_o, u3, u3_lens)
+        preds = preds.view(-1, preds.size(2))
+        # of size (N, SEQLEN, DIM)
+        u3 = u3.view(-1)
+        loss = criteria(preds, u3)
+
+        loss = loss / u3.ne(10003).long().sum().data[0]
+        valid_loss += loss.data[0]
+
+    base_enc.train()
+    ses_enc.train()
+    dec.train()
+
+    return valid_loss/(1 + i_batch)
+
+
 def main():
     print('torch version {}'.format(torch.__version__))
 
@@ -145,9 +156,10 @@ def main():
 
     parser = argparse.ArgumentParser(description='HRED parameter options')
     parser.add_argument('-e', dest='epoch', type=int, default=20, help='number of epochs')
-    parser.add_argument('-tc', dest='teacher', type=bool, default=True, help='default teacher forcing')
-    parser.add_argument('-bi', dest='bidi', type=bool, default=False, help='bidirectional enc/decs')
+    parser.add_argument('-tc', dest='teacher', action='store_true', default=False, help='default teacher forcing')
+    parser.add_argument('-bi', dest='bidi', action='store_true', default=False, help='bidirectional enc/decs')
     parser.add_argument('-nl', dest='num_lyr', type=int, default=1, help='number of enc/dec layers(same for both)')
+    parser.add_argument('-bs', dest='bt_siz', type=int, default=80, help='batch size')
     options = parser.parse_args()
     print(options)
 
