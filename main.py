@@ -145,7 +145,7 @@ def main():
 
     parser = argparse.ArgumentParser(description='HRED parameter options')
     parser.add_argument('-e', dest='epoch', type=int, default=20, help='number of epochs')
-    parser.add_argument('-tc', dest='teacher', type=bool, default=False, help='default teacher forcing')
+    parser.add_argument('-tc', dest='teacher', type=bool, default=True, help='default teacher forcing')
     parser.add_argument('-bi', dest='bidi', type=bool, default=False, help='bidirectional enc/decs')
     parser.add_argument('-nl', dest='num_lyr', type=int, default=1, help='number of enc/dec layers(same for both)')
     options = parser.parse_args()
@@ -159,7 +159,7 @@ def main():
         ses_enc.cuda()
         dec.cuda()
 
-    # train(options, base_enc, ses_enc, dec)
+    train(options, base_enc, ses_enc, dec)
     # chooses 10 examples only
     bt_siz, test_dataset = 1, MovieTriples('train', 10)
     test_dataloader = DataLoader(test_dataset, bt_siz, shuffle=False, num_workers=2, collate_fn=custom_collate_fn)
