@@ -26,6 +26,7 @@ class BaseEncoder(nn.Module):
         super(BaseEncoder, self).__init__()
         self.hid_size = hid_size
         self.num_lyr = num_lyr
+        self.drop = nn.Dropout(0.3)
         self.direction = 2 if bidi else 1
         # by default they requires grad is true
         self.embed = nn.Embedding(vocab_size, emb_size, padding_idx=10003, sparse=False)
@@ -39,6 +40,7 @@ class BaseEncoder(nn.Module):
             x = x.cuda()
             h_0 = h_0.cuda()
         x_emb = self.embed(x)
+        x_emb = self.drop(x_emb)
         x_emb = torch.nn.utils.rnn.pack_padded_sequence(x_emb, x_lens, batch_first=True)
         _, x_hid = self.rnn(x_emb, h_0)
         # move the batch to the front of the tensor
@@ -74,44 +76,59 @@ class Decoder(nn.Module):
         self.emb_size = emb_size
         self.hid_size = hid_size
         self.num_lyr = num_lyr
-
+        self.drop = nn.Dropout(0.3)
         self.tanh = nn.Tanh()
         self.in_embed = nn.Embedding(vocab_size, emb_size, padding_idx=10003, sparse=False)
-        self.rnn = nn.GRU(hidden_size=hid_size, input_size=emb_size,
+        self.rnn = nn.GRU(hidden_size=2*hid_size, input_size=emb_size,
                           num_layers=num_lyr, bidirectional=False, batch_first=True)
 
         self.lin1 = nn.Linear(ses_hid_size, hid_size)
         self.lin2 = nn.Linear(hid_size, emb_size)
-        self.out_embed = nn.Linear(emb_size // 2, vocab_size, False)
+        self.out_embed = nn.Linear(emb_size, vocab_size, False)
         self.log_soft2 = nn.LogSoftmax(dim=2)
         self.direction = 2 if bidi else 1
         self.teacher_forcing = teacher
+
+    def do_decode(self, siz, seq_len, ses_encoding, target=None):
+        preds = []
+        tok = Variable(torch.ones(siz, 1).long(), requires_grad=False)
+        hid_n = ses_encoding
+        if use_cuda:
+            tok = tok.cuda()
+        for i in range(seq_len):
+            if target is not None:
+                tok = target.select(1, i)
+                tok = tok.unsqueeze(1)
+
+            tok_vec = self.in_embed(tok)
+            tok_vec = self.drop(tok_vec)
+            hid_o, hid_n = self.rnn(tok_vec, torch.cat((hid_n, ses_encoding), 2))
+            hid_o = max_out(hid_o)
+            hid_n = max_out(hid_n)
+            hid_o = self.lin2(hid_o) + tok_vec
+            hid_o = self.out_embed(hid_o)
+            preds.append(hid_o)
+
+            op = self.log_soft2(hid_o)
+            _, max_ind = torch.max(op, dim=2)
+            tok = max_ind.clone()
+
+        dec_o = torch.cat(preds, 1)
+        return dec_o
 
     def forward(self, ses_encoding, x=None, x_lens=None, beam=5):
         ses_encoding = self.tanh(self.lin1(ses_encoding))
         # indicator that we are doing inference
         if x is None:
-            hid_n = ses_encoding
             n_candidates = []
             candidates = [([1], 0)]
             gen_len = 1
             while gen_len <= 10:
                 for c in candidates:
                     seq, score = c[0], c[1]
-                    tok = Variable(torch.LongTensor(seq), requires_grad=False)
-                    if use_cuda:
-                        tok = tok.cuda()
-                    tok = tok.unsqueeze(0)  # batch first is True
-                    tok_vec = self.in_embed(tok)
-                    hid_o, _ = self.rnn(tok_vec, hid_n)
-                    hid_o = self.lin4(hid_o) + tok_vec
-                    op = max_out(hid_o)
-                    op = self.out_embed(op)
-                    op = self.log_soft2(op)
-                    # take the hidden state of last time step
-                    op = op[:, -1, :]
-                    # a matrix of size 1, 10004
-
+                    _target = Variable(torch.LongTensor([seq]), requires_grad=False)
+                    dec_o = self.do_decode(1, len(seq), ses_encoding, _target)
+                    op = dec_o[:, -1, :]
                     for i in range(op.size(1)):
                         n_candidates.append((seq + [i], score + op.data[0, i]))
                 # hack to exponent sequence length by alpha-0.7
@@ -133,16 +150,20 @@ class Decoder(nn.Module):
 
             ses_encoding = ses_encoding.view(self.num_lyr*self.direction, siz, self.hid_size)
             if not self.teacher_forcing:
+                dec_o = self.do_decode(siz, seq_len, ses_encoding)
+                """
                 hid_n = ses_encoding
                 preds = []
                 for i in range(seq_len):
                     tok_vec = self.in_embed(tok)
-                    hid_o, hid_n = self.rnn(tok_vec, hid_n)
+                    tok_vec = self.drop(tok_vec)
+                    hid_o, hid_n = self.rnn(tok_vec, torch.cat((hid_n, ses_encoding), 2))
                     # hid_o (seq_len, batch, hidden_size * num_directions) batch_first affects
                     # hid_n (num_layers * num_directions, batch, hidden_size)  batch_first doesn't affect
                     # h_0 (num_layers * num_directions, batch, hidden_size) batch_first doesn't affect
-                    hid_o = self.lin2(hid_o) + tok_vec
                     hid_o = max_out(hid_o)
+                    hid_n = max_out(hid_n)
+                    hid_o = self.lin2(hid_o) + tok_vec
                     hid_o = self.out_embed(hid_o)
                     preds.append(hid_o)
 
@@ -151,6 +172,7 @@ class Decoder(nn.Module):
                     tok = max_ind.clone()
 
                 dec_o = torch.cat(preds, 1)
+                """
             else:
                 x_emb = self.in_embed(x)
                 x_emb_pack = torch.nn.utils.rnn.pack_padded_sequence(x_emb, x_lens, batch_first=True)

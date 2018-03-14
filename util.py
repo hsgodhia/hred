@@ -34,9 +34,9 @@ def cmp_to_key(mycmp):
 
 def cmp_dialog(d1, d2):
     if len(d1) < len(d2):
-        return 1
-    elif len(d1) > len(d2):
         return -1
+    elif len(d1) > len(d2):
+        return 1
     else:
         return 0
 
@@ -94,13 +94,15 @@ class MovieTriples(Dataset):
 
 def tensor_to_sent(x, inv_dict, greedy=False):
     sents = []
+    inv_dict[10003] = '<pad>'
     for li in x:
         if not greedy:
             li = li[0]
         sent = []
         for i in li:
-            if i < 10003:
-                sent.append(inv_dict[i])
+            sent.append(inv_dict[i])
+            if i == 2:
+                break
         sents.append(" ".join(sent))
     return sents
 
