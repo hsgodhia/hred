@@ -14,6 +14,14 @@ if use_cuda:
     torch.cuda.manual_seed(123)
 
 
+def init_param(model):
+    for name, param in model.named_parameters():
+        if name.startswith('rnn') and len(param.size()) >= 2:
+            init.orthogonal(param)
+        else:
+            init.normal(param, 0, 0.01)
+
+
 def train(options, base_enc, ses_enc, dec):
     base_enc.train()
     ses_enc.train()
@@ -21,11 +29,9 @@ def train(options, base_enc, ses_enc, dec):
 
     all_params = list(base_enc.parameters()) + list(ses_enc.parameters()) + list(dec.parameters())
     # init parameters
-    for name, param in base_enc.named_parameters():
-        if name.startswith('rnn') and len(param.size()) >= 2:
-            init.orthogonal(param)
-        else:
-            init.normal(param, 0, 0.01)
+    init_param(base_enc)
+    init_param(ses_enc)
+    init_param(dec)
 
     train_dataset, valid_dataset = MovieTriples('train', 1000), MovieTriples('train', 32)
     train_dataloader = DataLoader(train_dataset, batch_size=options.bt_siz, shuffle=False, num_workers=2,
@@ -50,24 +56,32 @@ def train(options, base_enc, ses_enc, dec):
             o1, o2 = base_enc(u1, u1_lens), base_enc(u2, u2_lens)
             qu_seq = torch.cat((o1, o2), 1)
             final_session_o = ses_enc(qu_seq)
-            preds = dec(final_session_o, u3, u3_lens)  # of size (N, SEQLEN, DIM)
-            preds = preds[:, :-1, :].contiguous().view(-1, preds.size(2))
 
-            u3 = u3[:, 1:].contiguous().view(-1)
-            loss = criteria(preds, u3)
+            for pu in range(2):
+                if pu == 1:
+                    u3 = u2
+                    u3_lens = u2_lens
+                final_session_o1 = final_session_o[:, pu, :].unsqueeze(1)
+                preds = dec(final_session_o1, u3, u3_lens)  # of size (N, SEQLEN, DIM)
+                preds = preds[:, :-1, :].contiguous().view(-1, preds.size(2))
 
-            loss = loss / u3.ne(10003).long().sum().data[0]
-            tr_loss += loss.data[0]
+                u3 = u3[:, 1:].contiguous().view(-1)
+                loss = criteria(preds, u3)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+                loss = loss / u3.ne(10003).long().sum().data[0]
+                tr_loss += loss.data[0]
 
-            torch.nn.utils.clip_grad_norm(all_params, 1.0)
+                optimizer.zero_grad()
+                loss.backward(retain_graph=True)
+                optimizer.step()
+
+                torch.nn.utils.clip_grad_norm(all_params, 1.0)
+
             if i_batch % 100 == 0:
                 print('done', i_batch)
 
-        vl_loss = calc_valid_loss(valid_dataloader, criteria, base_enc, ses_enc, dec)
+        vl_loss = 0
+        #vl_loss = calc_valid_loss(valid_dataloader, criteria, base_enc, ses_enc, dec)
         print("Training loss {} Valid loss {} ".format(tr_loss/(1 + i_batch), vl_loss))
         print("epoch {} took {}".format(i+1, (time.time() - strt)/3600.0))
         if i % 2 == 0 or i == options.epoch -1:

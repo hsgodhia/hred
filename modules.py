@@ -34,16 +34,28 @@ class BaseEncoder(nn.Module):
                           num_layers=num_lyr, bidirectional=bidi, batch_first=True)
 
     def forward(self, x, x_lens):
-        bt_siz = x.size(0)
+        bt_siz, seq_len = x.size(0), x.size(1)
         h_0 = Variable(torch.zeros(self.direction * self.num_lyr, bt_siz, self.hid_size), requires_grad=False)
         if use_cuda:
+            x = x.cuda()
             h_0 = h_0.cuda()
         x_emb = self.embed(x)
         x_emb = self.drop(x_emb)
         x_emb = torch.nn.utils.rnn.pack_padded_sequence(x_emb, x_lens, batch_first=True)
-        _, x_hid = self.rnn(x_emb, h_0)
+        x_o, x_hid = self.rnn(x_emb, h_0)
+
         # move the batch to the front of the tensor
         x_hid = x_hid.view(x.size(0), -1, self.hid_size)
+
+        """
+        base_ind = np.array([ti*seq_len for ti in range(bt_siz)])
+        x_o, _ = torch.nn.utils.rnn.pad_packed_sequence(x_o, batch_first=True)
+        x_o = x_o.contiguous().view(-1, self.hid_size)
+        x_o = x_o[base_ind + x_lens - 1, :]
+        x_o = x_o.unsqueeze(1)
+        print((x_o == x_hid).all()) --> true
+        """
+
         return x_hid
 
 
@@ -62,10 +74,11 @@ class SessionEncoder(nn.Module):
         if use_cuda:
             h_0 = h_0.cuda()
         # output, h_n for output batch is already dim 0
-        _, h_n = self.rnn(x, h_0)
+        h_o, h_n = self.rnn(x, h_0)
         # move the batch to the front of the tensor
+        # return h_o if you want to decode intermediate queries as well
         h_n = h_n.view(x.size(0), -1, self.hid_size)
-        return h_n
+        return h_o
 
 
 # decode the hidden state
@@ -95,6 +108,9 @@ class Decoder(nn.Module):
         hid_n = ses_encoding
         if use_cuda:
             tok = tok.cuda()
+            if target is not None:
+                target = target.cuda()
+
         for i in range(seq_len):
             if target is not None:
                 tok = target.select(1, i)
@@ -139,6 +155,8 @@ class Decoder(nn.Module):
 
             return candidates
         else:
+            if use_cuda:
+                x = x.cuda()
             siz, seq_len = x.size(0), x.size(1)
             ses_encoding = ses_encoding.view(self.num_lyr*self.direction, siz, self.hid_size)
             dec_o = self.do_decode(siz, seq_len, ses_encoding, x if self.teacher_forcing else None)

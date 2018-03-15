@@ -10,7 +10,7 @@ use_cuda = torch.cuda.is_available()
 def custom_collate_fn(batch):
     # input is a list of dialogturn objects
     bt_siz = len(batch)
-    pad_idx, max_seq_len = 10003, 120
+    pad_idx, max_seq_len = 10003, 40
 
     u1_batch, u2_batch, u3_batch = [], [], []
     u1_lens, u2_lens, u3_lens = np.zeros(bt_siz, dtype=int), np.zeros(bt_siz, dtype=int), np.zeros(bt_siz, dtype=int)
@@ -64,10 +64,7 @@ def custom_collate_fn(batch):
             u3_batch[i, :].data.copy_(torch.cat((seq3[:l_u3-1], end_tok), 0))
 
     sort1, sort2, sort3 = np.argsort(u1_lens*-1), np.argsort(u2_lens*-1), np.argsort(u3_lens*-1)
-    if use_cuda:
-        u1_batch = u1_batch.cuda()
-        u2_batch = u2_batch.cuda()
-        u3_batch = u3_batch.cuda()
+    # cant call use_cuda here because this function block is used in threading calls
 
     return u1_batch[sort1, :], u1_lens[sort1], u2_batch[sort2, :], u2_lens[sort2], u3_batch[sort3, :], u3_lens[sort3]
 
