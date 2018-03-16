@@ -10,7 +10,8 @@ use_cuda = torch.cuda.is_available()
 def custom_collate_fn(batch):
     # input is a list of dialogturn objects
     bt_siz = len(batch)
-    pad_idx, max_seq_len = 10003, 40
+    # sequence length only affects the memory requirement, otherwise longer is better
+    pad_idx, max_seq_len = 10003, 100
 
     u1_batch, u2_batch, u3_batch = [], [], []
     u1_lens, u2_lens, u3_lens = np.zeros(bt_siz, dtype=int), np.zeros(bt_siz, dtype=int), np.zeros(bt_siz, dtype=int)

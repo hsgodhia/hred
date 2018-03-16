@@ -1,4 +1,4 @@
-import torch.nn as nn, torch, numpy as np, copy, pdb
+import torch.nn as nn, torch, copy
 from torch.autograd import Variable
 use_cuda = torch.cuda.is_available()
 
@@ -74,11 +74,11 @@ class SessionEncoder(nn.Module):
         if use_cuda:
             h_0 = h_0.cuda()
         # output, h_n for output batch is already dim 0
-        h_o, h_n = self.rnn(x, h_0)
+        _, h_n = self.rnn(x, h_0)
         # move the batch to the front of the tensor
         # return h_o if you want to decode intermediate queries as well
         h_n = h_n.view(x.size(0), -1, self.hid_size)
-        return h_o
+        return h_n
 
 
 # decode the hidden state
@@ -95,8 +95,8 @@ class Decoder(nn.Module):
                           num_layers=num_lyr, bidirectional=False, batch_first=True)
 
         self.lin1 = nn.Linear(ses_hid_size, hid_size)
-        self.lin2 = nn.Linear(2*hid_size, 2*emb_size)
-        self.lin3 = nn.Embedding(vocab_size, 2*emb_size, padding_idx=10003, sparse=False)
+        self.lin2 = nn.Linear(2*hid_size, emb_size)
+        # self.lin3 = nn.Embedding(vocab_size, emb_size, padding_idx=10003, sparse=False)
         self.out_embed = nn.Linear(emb_size, vocab_size, False)
         self.log_soft2 = nn.LogSoftmax(dim=2)
         self.direction = 2 if bidi else 1
@@ -116,15 +116,16 @@ class Decoder(nn.Module):
                 tok = target.select(1, i)
                 tok = tok.unsqueeze(1)
 
-            tok_vec = self.in_embed(tok)
-            tok_vec = self.drop(tok_vec)
+            o_tok_vec = self.in_embed(tok)
+            tok_vec = self.drop(o_tok_vec)
             hid_o, hid_n = self.rnn(tok_vec, torch.cat((hid_n, ses_encoding), 2))
             hid_n = hid_n[:, :, :self.hid_size]
-            hid_o = self.lin2(hid_o) + self.lin3(tok)
-            hid_o = max_out(hid_o)
+            hid_o = self.lin2(hid_o) + o_tok_vec
+            hid_o = self.tanh(hid_o)
             hid_o = self.out_embed(hid_o)
             preds.append(hid_o)
 
+            # here we do greedy decoding
             op = self.log_soft2(hid_o)
             _, max_ind = torch.max(op, dim=2)
             tok = max_ind.clone()
@@ -145,8 +146,9 @@ class Decoder(nn.Module):
                     _target = Variable(torch.LongTensor([seq]), requires_grad=False)
                     dec_o = self.do_decode(1, len(seq), ses_encoding, _target)
                     op = dec_o[:, -1, :]
-                    for i in range(op.size(1)):
-                        n_candidates.append((seq + [i], score + op.data[0, i]))
+                    topval, topind = op.topk(beam, 1)
+                    for i in range(beam):
+                        n_candidates.append((seq + [topind.data[0, i]], score + topval.data[0, i]))
                 # hack to exponent sequence length by alpha-0.7
                 n_candidates.sort(key=lambda temp: temp[1] / (1.0*len(temp[0])**0.7), reverse=True)
                 candidates = copy.copy(n_candidates[:beam])
