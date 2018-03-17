@@ -121,7 +121,7 @@ class Decoder(nn.Module):
             hid_o, hid_n = self.rnn(tok_vec, torch.cat((hid_n, ses_encoding), 2))
             hid_n = hid_n[:, :, :self.hid_size]
             hid_o = self.lin2(hid_o) + o_tok_vec
-            hid_o = self.tanh(hid_o)
+            # hid_o = self.tanh(hid_o)
             hid_o = self.out_embed(hid_o)
             preds.append(hid_o)
 
@@ -140,7 +140,7 @@ class Decoder(nn.Module):
             n_candidates = []
             candidates = [([1], 0)]
             gen_len = 1
-            while gen_len <= 10:
+            while gen_len <= 100:
                 for c in candidates:
                     seq, score = c[0], c[1]
                     _target = Variable(torch.LongTensor([seq]), requires_grad=False)

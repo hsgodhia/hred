@@ -1,4 +1,5 @@
 import argparse
+import pdb
 import time
 import torch.nn.init as init
 import torch.optim as optim
@@ -33,12 +34,11 @@ def train(options, base_enc, ses_enc, dec):
     init_param(ses_enc)
     init_param(dec)
 
-    train_dataset, valid_dataset = MovieTriples('train', 1000), MovieTriples('train', 32)
+    train_dataset, valid_dataset = MovieTriples('subtle'), MovieTriples('train', 32)
     train_dataloader = DataLoader(train_dataset, batch_size=options.bt_siz, shuffle=False, num_workers=2,
                                   collate_fn=custom_collate_fn)
-    valid_dataloader = DataLoader(valid_dataset, batch_size=options.bt_siz, shuffle=False, num_workers=2,
-                                  collate_fn=custom_collate_fn)
-
+    # valid_dataloader = DataLoader(valid_dataset, batch_size=options.bt_siz, shuffle=False, num_workers=2,
+                                  #collate_fn=custom_collate_fn)
     print("Training set {} Validation set {}".format(len(train_dataset), len(valid_dataset)))
 
     optimizer = optim.Adam(all_params)
@@ -51,20 +51,21 @@ def train(options, base_enc, ses_enc, dec):
         tr_loss = 0
         strt = time.time()
         for i_batch, sample_batch in enumerate(train_dataloader):
-            u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], \
-                                                    sample_batch[3], sample_batch[4], sample_batch[5]
+            u1, u1_lens, u2, u2_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3]
             o1, o2 = base_enc(u1, u1_lens), base_enc(u2, u2_lens)
-            qu_seq = torch.cat((o1, o2), 1)
+            # qu_seq = torch.cat((o1, o2), 1)
+            qu_seq = o1
             final_session_o = ses_enc(qu_seq)
             if use_cuda:
-                u3 = u3.cuda()
-            preds = dec(final_session_o, u3, u3_lens)  # of size (N, SEQLEN, DIM)
+                u2 = u2.cuda()
+            
+            preds = dec(final_session_o, u2, u2_lens)  # of size (N, SEQLEN, DIM)
             preds = preds[:, :-1, :].contiguous().view(-1, preds.size(2))
 
-            u3 = u3[:, 1:].contiguous().view(-1)
-            loss = criteria(preds, u3)
+            u2 = u2[:, 1:].contiguous().view(-1)
+            loss = criteria(preds, u2)
 
-            loss = loss / u3.ne(10003).long().sum().data[0]
+            loss = loss / u2.ne(10003).long().sum().data[0]
             tr_loss += loss.data[0]
 
             optimizer.zero_grad()
@@ -76,8 +77,8 @@ def train(options, base_enc, ses_enc, dec):
             if i_batch % 100 == 0:
                 print('done', i_batch)
 
-        # vl_loss = 0
-        vl_loss = calc_valid_loss(valid_dataloader, criteria, base_enc, ses_enc, dec)
+        vl_loss = 0
+        # vl_loss = calc_valid_loss(valid_dataloader, criteria, base_enc, ses_enc, dec)
         print("Training loss {} Valid loss {} ".format(tr_loss/(1 + i_batch), vl_loss))
         print("epoch {} took {}".format(i+1, (time.time() - strt)/3600.0))
         if i % 2 == 0 or i == options.epoch -1:
@@ -128,7 +129,8 @@ def calc_valid_loss(data_loader, criteria, base_enc, ses_enc, dec):
     for i_batch, sample_batch in enumerate(data_loader):
         u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3], \
                                                 sample_batch[4], sample_batch[5]
-
+        if use_cuda:
+            u3 = u3.cuda()
         o1, o2 = base_enc(u1, u1_lens), base_enc(u2, u2_lens)
         qu_seq = torch.cat((o1, o2), 1)
         final_session_o = ses_enc(qu_seq)
@@ -153,7 +155,7 @@ def main():
     print('torch version {}'.format(torch.__version__))
 
     # we use a common dict for all test, train and validation
-    _dict_file = '/home/harshal/code/research/hred/data/MovieTriples_Dataset/Training.dict.pkl'
+    _dict_file = '/home/harshals/hed-dlg/Data/MovieTriples/Training.dict.pkl'
     with open(_dict_file, 'rb') as fp2:
         dict_data = pickle.load(fp2)
     # dictionary data is like ('</s>', 2, 588827, 785135)
@@ -188,9 +190,9 @@ def main():
     if not options.test:
         train(options, base_enc, ses_enc, dec)
     # chooses 10 examples only
-    bt_siz, test_dataset = 1, MovieTriples('train', 10)
-    test_dataloader = DataLoader(test_dataset, bt_siz, shuffle=False, num_workers=2, collate_fn=custom_collate_fn)
-    inference_beam(test_dataloader, base_enc, ses_enc, dec, inv_dict, options)
+    #bt_siz, test_dataset = 1, MovieTriples('train', 10)
+    #test_dataloader = DataLoader(test_dataset, bt_siz, shuffle=False, num_workers=2, collate_fn=custom_collate_fn)
+    #inference_beam(test_dataloader, base_enc, ses_enc, dec, inv_dict, options)
 
 
 main()
