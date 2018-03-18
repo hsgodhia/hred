@@ -1,4 +1,4 @@
-import torch.nn as nn, torch, copy
+import torch.nn as nn, torch, copy, tqdm
 from torch.autograd import Variable
 use_cuda = torch.cuda.is_available()
 
@@ -105,64 +105,82 @@ class Decoder(nn.Module):
 
     def do_decode(self, siz, seq_len, ses_encoding, target=None):
         preds = []
-        tok = Variable(torch.ones(siz, 1).long(), requires_grad=False)
+        inp_tok = Variable(torch.ones(siz, 1).long(), requires_grad=False)
         hid_n = ses_encoding
         if use_cuda:
-            tok = tok.cuda()
+            inp_tok = inp_tok.cuda()
             if target is not None:
                 target = target.cuda()
-
+        log_l = 0
         for i in range(seq_len):
             if target is not None:
-                tok = target.select(1, i)
-                tok = tok.unsqueeze(1)
+                inp_tok = target.select(1, i)
+                inp_tok = inp_tok.unsqueeze(1)
 
-            o_tok_vec = self.in_embed(tok)
-            tok_vec = self.drop(o_tok_vec)
-            hid_o, hid_n = self.rnn(tok_vec, torch.cat((hid_n, ses_encoding), 2))
+            inp_tok_vec = self.in_embed(inp_tok)
+            inp_drop_tok_vec = self.drop(inp_tok_vec)
+            hid_o, hid_n = self.rnn(inp_drop_tok_vec, torch.cat((hid_n, ses_encoding), 2))
             hid_n = hid_n[:, :, :self.hid_size]
-            hid_o = self.lin2(hid_o) + o_tok_vec
+            hid_o = self.lin2(hid_o) + inp_tok_vec
             hid_o = self.out_embed(hid_o)
             preds.append(hid_o)
-
             # here we do greedy decoding
             op = self.log_soft2(hid_o)
-            _, max_ind = torch.max(op, dim=2)
-            tok = max_ind.clone()
+            max_val, max_ind = torch.max(op, dim=2)
+            inp_tok = max_ind.clone()
+
+            if i+1 < seq_len:
+                if target is not None:
+                    log_l += torch.diag(op[:, :, target.select(1, i+1).data].select(1, 0))
+                else:
+                    log_l += max_val
 
         dec_o = torch.cat(preds, 1)
-        return dec_o
+        return dec_o, log_l
 
     def forward(self, ses_encoding, x=None, x_lens=None, beam=5):
         ses_encoding = self.tanh(self.lin1(ses_encoding))
         # indicator that we are doing inference
         if x is None:
-            n_candidates = []
+            n_candidates, final_candids = [], []
             candidates = [([1], 0)]
             gen_len = 1
+            pbar = tqdm.tqdm(total=50)
             while gen_len <= 50:
                 for c in candidates:
                     seq, score = c[0], c[1]
                     _target = Variable(torch.LongTensor([seq]), requires_grad=False)
-                    dec_o = self.do_decode(1, len(seq), ses_encoding, _target)
-                    op = dec_o[:, -1, :]
+                    dec_o, log_l = self.do_decode(1, len(seq), ses_encoding, _target)
+                    op = self.log_soft2(dec_o)
+                    op = op[:, -1, :]
                     topval, topind = op.topk(beam, 1)
                     for i in range(beam):
-                        n_candidates.append((seq + [topind.data[0, i]], score + topval.data[0, i] - self.diversity_rate*(i+1)))
+                        ctok, cval = topind.data[0, i], topval.data[0, i]
+                        if ctok == 2:
+                            # todo should I directly return this as a result or will it be stored to be compared
+                            # prune it and for comparsion in final sequences
+                            final_candids.append((seq + [ctok], score))
+                            # todo we don't include <s> score, so ignore </s> score as well
+                        else:
+                            n_candidates.append((seq + [ctok], score + cval - self.diversity_rate*(i+1)))
+
                 # hack to exponent sequence length by alpha-0.7
                 n_candidates.sort(key=lambda temp: temp[1] / (1.0*len(temp[0])**0.7), reverse=True)
                 candidates = copy.copy(n_candidates[:beam])
                 n_candidates[:] = []
                 gen_len += 1
-
-            return candidates
+                pbar.update(1)
+            pbar.close()
+            final_candids = final_candids + candidates
+            final_candids.sort(key=lambda temp: temp[1] / (1.0 * len(temp[0]) ** 0.7), reverse=True)
+            return final_candids[:beam]
         else:
             if use_cuda:
                 x = x.cuda()
             siz, seq_len = x.size(0), x.size(1)
             ses_encoding = ses_encoding.view(self.num_lyr*self.direction, siz, self.hid_size)
-            dec_o = self.do_decode(siz, seq_len, ses_encoding, x if self.teacher_forcing else None)
-            return dec_o
+            dec_o, log_l = self.do_decode(siz, seq_len, ses_encoding, x if self.teacher_forcing else None)
+            return dec_o, log_l
 
     def set_teacher_forcing(self, val):
         self.teacher_forcing = val

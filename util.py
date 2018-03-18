@@ -3,7 +3,9 @@ import copy
 import pickle
 from torch.utils.data import Dataset
 from torch.autograd import Variable
+from tqdm import tqdm
 import numpy as np
+
 use_cuda = torch.cuda.is_available()
 
 
@@ -162,11 +164,15 @@ def tensor_to_sent(x, inv_dict, greedy=False):
     inv_dict[10003] = '<pad>'
     for li in x:
         if not greedy:
-            li = li[0]
+            scr = li[1]
+            seq = li[0]
+        else:
+            scr = 0
+            seq = li
         sent = []
-        for i in li:
+        for i in seq:
             sent.append(inv_dict[i])
             if i == 2:
                 break
-        sents.append(" ".join(sent))
+        sents.append((" ".join(sent), scr))
     return sents
