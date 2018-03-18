@@ -107,6 +107,7 @@ def cmp_dialog(d1, d2):
 
 class DialogTurn:
     def __init__(self, item):
+        self.u1, self.u2, self.u3 = [], [], []
         cur_list, i = [], 0
         for d in item:
             cur_list.append(d)

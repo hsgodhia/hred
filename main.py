@@ -28,15 +28,20 @@ def train(options, base_enc, ses_enc, dec):
     dec.train()
 
     all_params = list(base_enc.parameters()) + list(ses_enc.parameters()) + list(dec.parameters())
-    # init parameters
-    init_param(base_enc)
-    init_param(ses_enc)
-    init_param(dec)
 
-    train_dataset, valid_dataset = MovieTriples('train', 1000), MovieTriples('train', 32)
-    train_dataloader = DataLoader(train_dataset, batch_size=options.bt_siz, shuffle=False, num_workers=2,
+    if options.btstrp:
+        load_model_state(base_enc, "subtle_enc_mdl.pth")
+        load_model_state(ses_enc, "subtle_ses_mdl.pth")
+        load_model_state(dec, "subtle_dec_mdl.pth")
+    else:
+        init_param(base_enc)
+        init_param(ses_enc)
+        init_param(dec)
+
+    train_dataset, valid_dataset = MovieTriples('train'), MovieTriples('valid')
+    train_dataloader = DataLoader(train_dataset, batch_size=options.bt_siz, shuffle=True, num_workers=2,
                                   collate_fn=custom_collate_fn)
-    valid_dataloader = DataLoader(valid_dataset, batch_size=options.bt_siz, shuffle=False, num_workers=2,
+    valid_dataloader = DataLoader(valid_dataset, batch_size=options.bt_siz, shuffle=True, num_workers=2,
                                   collate_fn=custom_collate_fn)
 
     print("Training set {} Validation set {}".format(len(train_dataset), len(valid_dataset)))
@@ -73,13 +78,9 @@ def train(options, base_enc, ses_enc, dec):
 
             torch.nn.utils.clip_grad_norm(all_params, 1.0)
 
-            if i_batch % 100 == 0:
-                print('done', i_batch)
-
-        # vl_loss = 0
         vl_loss = calc_valid_loss(valid_dataloader, criteria, base_enc, ses_enc, dec)
         print("Training loss {} Valid loss {} ".format(tr_loss/(1 + i_batch), vl_loss))
-        print("epoch {} took {}".format(i+1, (time.time() - strt)/3600.0))
+        print("epoch {} took {} mins".format(i+1, (time.time() - strt)/60.0))
         if i % 2 == 0 or i == options.epoch -1:
             torch.save(base_enc.state_dict(), options.name + '_enc_mdl.pth')
             torch.save(ses_enc.state_dict(), options.name + '_ses_mdl.pth')
@@ -87,16 +88,16 @@ def train(options, base_enc, ses_enc, dec):
             torch.save(optimizer.state_dict(), options.name + '_opti_st.pth')
 
 
+def load_model_state(mdl, fl):
+    saved_state = torch.load(fl)
+    mdl.load_state_dict(saved_state)
+
+
 # sample a sentence from the test set by using beam search
 def inference_beam(dataloader, base_enc, ses_enc, dec, inv_dict, options):
-    saved_state = torch.load(options.name + "_enc_mdl.pth")
-    base_enc.load_state_dict(saved_state)
-
-    saved_state = torch.load(options.name + "_ses_mdl.pth")
-    ses_enc.load_state_dict(saved_state)
-
-    saved_state = torch.load(options.name + "_dec_mdl.pth")
-    dec.load_state_dict(saved_state)
+    load_model_state(base_enc, options.name + "_enc_mdl.pth")
+    load_model_state(ses_enc, options.name + "_ses_mdl.pth")
+    load_model_state(dec, options.name + "_dec_mdl.pth")
 
     base_enc.eval()
     ses_enc.eval()
@@ -128,6 +129,8 @@ def calc_valid_loss(data_loader, criteria, base_enc, ses_enc, dec):
     for i_batch, sample_batch in enumerate(data_loader):
         u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3], \
                                                 sample_batch[4], sample_batch[5]
+        if use_cuda:
+            u3 = u3.cuda()
 
         o1, o2 = base_enc(u1, u1_lens), base_enc(u2, u2_lens)
         qu_seq = torch.cat((o1, o2), 1)
@@ -170,6 +173,7 @@ def main():
     parser.add_argument('-tc', dest='teacher', action='store_true', default=False, help='default teacher forcing')
     parser.add_argument('-bi', dest='bidi', action='store_true', default=False, help='bidirectional enc/decs')
     parser.add_argument('-test', dest='test', action='store_true', default=False, help='only test or inference')
+    parser.add_argument('-btstrp', dest='btstrp', action='store_true', default=False, help='bootstrap/trained on subtle')
     parser.add_argument('-nl', dest='num_lyr', type=int, default=1, help='number of enc/dec layers(same for both)')
     parser.add_argument('-bs', dest='bt_siz', type=int, default=80, help='batch size')
     parser.add_argument('-bms', dest='beam', type=int, default=1, help='beam size for decoding')
@@ -188,8 +192,8 @@ def main():
     if not options.test:
         train(options, base_enc, ses_enc, dec)
     # chooses 10 examples only
-    bt_siz, test_dataset = 1, MovieTriples('train', 10)
-    test_dataloader = DataLoader(test_dataset, bt_siz, shuffle=False, num_workers=2, collate_fn=custom_collate_fn)
+    bt_siz, test_dataset = 1, MovieTriples('test', 100)
+    test_dataloader = DataLoader(test_dataset, bt_siz, shuffle=True, num_workers=2, collate_fn=custom_collate_fn)
     inference_beam(test_dataloader, base_enc, ses_enc, dec, inv_dict, options)
 
 
