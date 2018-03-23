@@ -91,38 +91,52 @@ class Decoder(nn.Module):
         self.drop = nn.Dropout(0.3)
         self.tanh = nn.Tanh()
         self.in_embed = nn.Embedding(vocab_size, emb_size, padding_idx=10003, sparse=False)
+        self.out_embed = nn.Embedding(vocab_size, emb_size, padding_idx=10003, sparse=False)
+
         self.rnn = nn.GRU(hidden_size=2*hid_size, input_size=emb_size,
                           num_layers=num_lyr, bidirectional=False, batch_first=True)
+        self.lm = nn.RNN(input_size=self.emb_size, hidden_size=self.hid_size, num_layers=self.num_lyr, batch_first=True)
 
         self.lin1 = nn.Linear(ses_hid_size, hid_size)
         self.lin2 = nn.Linear(2*hid_size, emb_size)
-        # self.lin3 = nn.Embedding(vocab_size, emb_size, padding_idx=10003, sparse=False)
-        self.out_embed = nn.Linear(emb_size, vocab_size, False)
+
+        self.projection = nn.Linear(emb_size, vocab_size, False)
+        self.lm_projection = nn.Linear(self.hid_size, vocab_size, False)
+
         self.log_soft2 = nn.LogSoftmax(dim=2)
         self.direction = 2 if bidi else 1
         self.teacher_forcing = teacher
         self.diversity_rate = 0.15
 
     def do_decode(self, siz, seq_len, ses_encoding, target=None):
-        preds = []
+        hid_n, preds = ses_encoding, []
         inp_tok = Variable(torch.ones(siz, 1).long(), requires_grad=False)
-        hid_n = ses_encoding
+        out_tok_vec = Variable(torch.zeros(siz, 1, self.emb_size), requires_grad=False)
+        lm_hid = Variable(torch.zeros(self.direction * self.num_lyr, siz, self.hid_size), requires_grad=False)
+
         if use_cuda:
+            lm_hid = lm_hid.cuda()
+            out_tok_vec = out_tok_vec.cuda()
             inp_tok = inp_tok.cuda()
+
             if target is not None:
                 target = target.cuda()
+
         log_l = 0
         for i in range(seq_len):
             if target is not None:
                 inp_tok = target.select(1, i)
+
                 inp_tok = inp_tok.unsqueeze(1)
 
             inp_tok_vec = self.in_embed(inp_tok)
-            inp_drop_tok_vec = self.drop(inp_tok_vec)
-            hid_o, hid_n = self.rnn(inp_drop_tok_vec, torch.cat((hid_n, ses_encoding), 2))
+            inp_tok_vec = self.drop(inp_tok_vec)
+            hid_o, hid_n = self.rnn(inp_tok_vec, torch.cat((hid_n, ses_encoding), 2))
             hid_n = hid_n[:, :, :self.hid_size]
-            hid_o = self.lin2(hid_o) + inp_tok_vec
-            hid_o = self.out_embed(hid_o)
+
+            lm_o, lm_hid = self.lm(out_tok_vec, lm_hid)
+            hid_o = self.projection(self.lin2(hid_o)) + self.lm_projection(lm_o)
+
             preds.append(hid_o)
             # here we do greedy decoding
             op = self.log_soft2(hid_o)
@@ -131,7 +145,8 @@ class Decoder(nn.Module):
 
             if i+1 < seq_len:
                 if target is not None:
-                    log_l += torch.diag(op[:, :, target.select(1, i+1).data].select(1, 0))
+                    mask = target.select(1, i+1) < 10003
+                    log_l += torch.diag(op[:, :, target.select(1, i+1).data].select(1, 0)) * mask.float()
                 else:
                     log_l += max_val
 

@@ -1,5 +1,6 @@
 import argparse
 import time
+
 import torch.nn.init as init
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -38,7 +39,7 @@ def train(options, base_enc, ses_enc, dec):
         init_param(ses_enc)
         init_param(dec)
 
-    train_dataset, valid_dataset = MovieTriples('train', 1000), MovieTriples('train', 10)
+    train_dataset, valid_dataset = MovieTriples('train', 1000), MovieTriples('valid', 10)
     train_dataloader = DataLoader(train_dataset, batch_size=options.bt_siz, shuffle=True, num_workers=2,
                                   collate_fn=custom_collate_fn)
     valid_dataloader = DataLoader(valid_dataset, batch_size=options.bt_siz, shuffle=True, num_workers=2,
@@ -46,7 +47,7 @@ def train(options, base_enc, ses_enc, dec):
 
     print("Training set {} Validation set {}".format(len(train_dataset), len(valid_dataset)))
 
-    optimizer = optim.Adam(all_params, lr=0.0001)
+    optimizer = optim.Adam(all_params, lr=0.001)
     criteria = nn.CrossEntropyLoss(ignore_index=10003, size_average=False)
 
     if use_cuda:
@@ -77,7 +78,6 @@ def train(options, base_enc, ses_enc, dec):
             optimizer.step()
 
             torch.nn.utils.clip_grad_norm(all_params, 1.0)
-
         vl_loss, vl_logl = calc_valid_loss(valid_dataloader, criteria, base_enc, ses_enc, dec)
         print("Training loss {} Valid loss {} Valid log likelihood {}".format(tr_loss/(1 + i_batch), vl_loss, vl_logl))
         print("epoch {} took {} mins".format(i+1, (time.time() - strt)/60.0))
@@ -125,7 +125,7 @@ def calc_valid_loss(data_loader, criteria, base_enc, ses_enc, dec):
     ses_enc.eval()
     dec.eval()
 
-    valid_loss, total_log_l = 0, 0
+    valid_loss, total_log_l, num_words = 0, 0, 0
     for i_batch, sample_batch in enumerate(data_loader):
         u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3], \
                                                 sample_batch[4], sample_batch[5]
@@ -137,22 +137,52 @@ def calc_valid_loss(data_loader, criteria, base_enc, ses_enc, dec):
         final_session_o = ses_enc(qu_seq)
 
         preds, log_l = dec(final_session_o, u3, u3_lens)
-        preds = preds.view(-1, preds.size(2))
-        # of size (N, SEQLEN, DIM)
-        u3 = u3.view(-1)
+        preds = preds[:, :-1, :].contiguous().view(-1, preds.size(2))
+        u3 = u3[:, 1:].contiguous().view(-1)
+
         loss = criteria(preds, u3)
 
-        loss = loss / u3.ne(10003).long().sum().data[0]
-        log_l = log_l / u3.ne(10003).long().sum().data[0]
-
-        total_log_l += torch.mean(log_l, 0).data[0]
+        num_words += u3.ne(10003).long().sum().data[0]
+        total_log_l += torch.sum(log_l, 0).data[0]
         valid_loss += loss.data[0]
 
     base_enc.train()
     ses_enc.train()
     dec.train()
 
-    return valid_loss/(1 + i_batch), total_log_l
+    return valid_loss/num_words, total_log_l/num_words
+
+
+def data_to_seq():
+    # we use a common dict for all test, train and validation
+    _dict_file = '/home/harshals/hed-dlg/Data/MovieTriples/Training.dict.pkl'
+    with open(_dict_file, 'rb') as fp2:
+        dict_data = pickle.load(fp2)
+    # dictionary data is like ('</s>', 2, 588827, 785135)
+    # so i believe that the first is the ids are assigned by frequency
+    # thinking to use a counter collection out here maybe
+    inv_dict, vocab_dict = {}, {}
+    for x in dict_data:
+        tok, f, _, _ = x
+        inv_dict[f] = tok
+        vocab_dict[tok] = f
+    _file = '/data2/chatbot_eval_issues/results/AMT_NCM_Test_NCM_Joao/neural_conv_model_eval_source.txt'
+    with open(_file, 'r') as fp:
+        all_seqs = []
+        for lin in fp.readlines():
+            seq = list()
+            seq.append(1)
+            for wrd in lin.split(" "):
+                if wrd not in vocab_dict:
+                    seq.append(0)
+                else:
+                    seq_id = vocab_dict[wrd]
+                    seq.append(seq_id)
+            seq.append(2)
+        all_seqs.append(seq)
+
+    with open('CustomTest.pkl', 'wb') as handle:
+        pickle.dump(all_seqs, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 def main():
