@@ -149,7 +149,7 @@ class MovieTriples(Dataset):
                 self.utterance_data.append(DialogTurn(d))
         self.utterance_data.sort(key=cmp_to_key(cmp_dialog))
         if length:
-            self.utterance_data = self.utterance_data[:length]
+            self.utterance_data = self.utterance_data[1000:1000+length]
 
     def __len__(self):
         return len(self.utterance_data)

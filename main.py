@@ -47,14 +47,14 @@ def train(options, base_enc, ses_enc, dec):
 
     print("Training set {} Validation set {}".format(len(train_dataset), len(valid_dataset)))
 
-    optimizer = optim.Adam(all_params, lr=0.001)
+    optimizer = optim.Adam(all_params, options.lr)
     criteria = nn.CrossEntropyLoss(ignore_index=10003, size_average=False)
 
     if use_cuda:
         criteria.cuda()
 
     for i in range(options.epoch):
-        tr_loss = 0
+        tr_loss, num_words = 0, 0
         strt = time.time()
         for i_batch, sample_batch in enumerate(tqdm(train_dataloader)):
             u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], \
@@ -64,22 +64,23 @@ def train(options, base_enc, ses_enc, dec):
             final_session_o = ses_enc(qu_seq)
             if use_cuda:
                 u3 = u3.cuda()
-            preds, log_l = dec(final_session_o, u3, u3_lens)  # of size (N, SEQLEN, DIM)
+            preds, lmpreds = dec(final_session_o, u3, u3_lens)  # of size (N, SEQLEN, DIM)
+            lmpreds = lmpreds[:, :-1, :].contiguous().view(-1, lmpreds.size(2))
             preds = preds[:, :-1, :].contiguous().view(-1, preds.size(2))
             u3 = u3[:, 1:].contiguous().view(-1)
 
             loss = criteria(preds, u3)
-
-            loss = loss / u3.ne(10003).long().sum().data[0]
-            tr_loss += loss.data[0]
+            lm_loss = criteria(lmpreds, u3)
+            num_words += u3.ne(10003).long().sum().data[0]
+            tr_loss += loss.data[0] + lm_loss.data[0]
 
             optimizer.zero_grad()
-            loss.backward()
+            (lm_loss + loss).backward()
             optimizer.step()
 
             torch.nn.utils.clip_grad_norm(all_params, 1.0)
-        vl_loss, vl_logl = calc_valid_loss(valid_dataloader, criteria, base_enc, ses_enc, dec)
-        print("Training loss {} Valid loss {} Valid log likelihood {}".format(tr_loss/(1 + i_batch), vl_loss, vl_logl))
+        vl_loss = calc_valid_loss(valid_dataloader, criteria, base_enc, ses_enc, dec)
+        print("Training loss {} Valid loss {}".format(tr_loss/num_words, vl_loss))
         print("epoch {} took {} mins".format(i+1, (time.time() - strt)/60.0))
         if i % 2 == 0 or i == options.epoch -1:
             torch.save(base_enc.state_dict(), options.name + '_enc_mdl.pth')
@@ -125,7 +126,7 @@ def calc_valid_loss(data_loader, criteria, base_enc, ses_enc, dec):
     ses_enc.eval()
     dec.eval()
 
-    valid_loss, total_log_l, num_words = 0, 0, 0
+    valid_loss, num_words = 0, 0
     for i_batch, sample_batch in enumerate(data_loader):
         u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3], \
                                                 sample_batch[4], sample_batch[5]
@@ -136,21 +137,21 @@ def calc_valid_loss(data_loader, criteria, base_enc, ses_enc, dec):
         qu_seq = torch.cat((o1, o2), 1)
         final_session_o = ses_enc(qu_seq)
 
-        preds, log_l = dec(final_session_o, u3, u3_lens)
+        preds, lmpreds = dec(final_session_o, u3, u3_lens)
         preds = preds[:, :-1, :].contiguous().view(-1, preds.size(2))
+        lmpreds = lmpreds[:, :-1, :].contiguous().view(-1, lmpreds.size(2))
         u3 = u3[:, 1:].contiguous().view(-1)
 
         loss = criteria(preds, u3)
-
+        lm_loss = criteria(lmpreds, u3)
         num_words += u3.ne(10003).long().sum().data[0]
-        total_log_l += torch.sum(log_l, 0).data[0]
-        valid_loss += loss.data[0]
+        valid_loss += loss.data[0] + lm_loss.data[0]
 
     base_enc.train()
     ses_enc.train()
     dec.train()
 
-    return valid_loss/num_words, total_log_l/num_words
+    return valid_loss/num_words
 
 
 def data_to_seq():
@@ -208,6 +209,7 @@ def main():
     parser.add_argument('-test', dest='test', action='store_true', default=False, help='only test or inference')
     parser.add_argument('-btstrp', dest='btstrp', default=None, help='bootstrap/load parameters give name')
     parser.add_argument('-nl', dest='num_lyr', type=int, default=1, help='number of enc/dec layers(same for both)')
+    parser.add_argument('-lr', dest='lr', type=float, default=0.001, help='learning rate for optimizer')
     parser.add_argument('-bs', dest='bt_siz', type=int, default=100, help='batch size')
     parser.add_argument('-bms', dest='beam', type=int, default=1, help='beam size for decoding')
 
