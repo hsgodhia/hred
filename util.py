@@ -134,13 +134,12 @@ class DialogTurn:
 
 class MovieTriples(Dataset):
     def __init__(self, data_type, length=None):
-
         if data_type == 'train':
-            _file = '/home/harshal/code/research/hred/data/MovieTriples_Dataset/Training.triples.pkl'
+            _file = '/home/harshals/hed-dlg/Data/MovieTriples/Training.triples.pkl'
         elif data_type == 'valid':
-            _file = '/home/harshal/code/research/hred/data/MovieTriples_Dataset/Validation.triples.pkl'
+            _file = '/home/harshals/hed-dlg/Data/MovieTriples/Validation.triples.pkl'
         elif data_type == 'test':
-            _file = '/home/harshal/code/research/hred/data/MovieTriples_Dataset/Test.triples.pkl'
+            _file = '/home/harshals/hed-dlg/Data/MovieTriples/Test.triples.pkl'
         self.utterance_data = []
 
         with open(_file, 'rb') as fp:
@@ -149,7 +148,7 @@ class MovieTriples(Dataset):
                 self.utterance_data.append(DialogTurn(d))
         self.utterance_data.sort(key=cmp_to_key(cmp_dialog))
         if length:
-            self.utterance_data = self.utterance_data[1000:1000+length]
+            self.utterance_data = self.utterance_data[2000:2000+length]
 
     def __len__(self):
         return len(self.utterance_data)

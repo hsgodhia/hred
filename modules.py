@@ -32,9 +32,10 @@ class BaseEncoder(nn.Module):
         # by default they requires grad is true
         self.embed = nn.Embedding(vocab_size, emb_size, padding_idx=10003, sparse=False)
         self.rnn = nn.GRU(input_size=emb_size, hidden_size=hid_size,
-                          num_layers=num_lyr, bidirectional=bidi, batch_first=True)
+                          num_layers=num_lyr, bidirectional=bidi, batch_first=True, dropout=0.3)
 
-    def forward(self, x, x_lens):
+    def forward(self, inp):
+        x, x_lens = inp[0], inp[1]
         bt_siz, seq_len = x.size(0), x.size(1)
         h_0 = Variable(torch.zeros(self.direction * self.num_lyr, bt_siz, self.hid_size), requires_grad=False)
         if use_cuda:
@@ -47,16 +48,6 @@ class BaseEncoder(nn.Module):
 
         # move the batch to the front of the tensor
         x_hid = x_hid.view(x.size(0), -1, self.hid_size)
-
-        """
-        base_ind = np.array([ti*seq_len for ti in range(bt_siz)])
-        x_o, _ = torch.nn.utils.rnn.pad_packed_sequence(x_o, batch_first=True)
-        x_o = x_o.contiguous().view(-1, self.hid_size)
-        x_o = x_o[base_ind + x_lens - 1, :]
-        x_o = x_o.unsqueeze(1)
-        print((x_o == x_hid).all()) --> true
-        """
-
         return x_hid
 
 
@@ -95,64 +86,74 @@ class Decoder(nn.Module):
         self.out_embed = nn.Embedding(vocab_size, emb_size, padding_idx=10003, sparse=False)
 
         self.rnn = nn.GRU(hidden_size=2*hid_size, input_size=emb_size,
-                          num_layers=num_lyr, bidirectional=False, batch_first=True)
-        self.lm = nn.RNN(input_size=self.emb_size, hidden_size=self.hid_size, num_layers=self.num_lyr, batch_first=True)
+                          num_layers=num_lyr, bidirectional=False, batch_first=True, dropout=0.3)
+        self.lm = nn.RNN(input_size=self.emb_size, hidden_size=self.hid_size, num_layers=self.num_lyr, batch_first=True, dropout=0.3)
 
         self.lin1 = nn.Linear(ses_hid_size, hid_size)
-        self.lin2 = nn.Linear(2*hid_size, emb_size)
-
-        self.projection = nn.Linear(emb_size, vocab_size, False)
-        self.lm_projection = nn.Linear(self.hid_size, vocab_size, False)
-
-        self.log_soft2 = nn.LogSoftmax(dim=2)
+        self.lin2 = nn.Linear(2*self.hid_size, emb_size, False)
+        self.lin3 = nn.Linear(self.hid_size, emb_size, False)
+        
         self.direction = 2 if bidi else 1
         self.teacher_forcing = teacher
-        self.diversity_rate = 0.5
+        self.diversity_rate = 1
         self.antilm_param = 4
-        self.lambda_param = 0.2
+        self.lambda_param = 0.4
 
     def do_decode(self, siz, seq_len, ses_encoding, target=None):
         hid_n, preds, lm_preds = ses_encoding, [], []
         inp_tok = Variable(torch.ones(siz, 1).long(), requires_grad=False)
-
         lm_hid = Variable(torch.zeros(self.direction * self.num_lyr, siz, self.hid_size), requires_grad=False)
 
         if use_cuda:
             lm_hid = lm_hid.cuda()
             inp_tok = inp_tok.cuda()
-
             if target is not None:
                 target = target.cuda()
-        out_tok_vec = self.out_embed(inp_tok.clone())
+                
         for i in range(seq_len):
-            if target is not None:
+            if self.teacher_forcing:
                 inp_tok = target.select(1, i)
                 inp_tok = inp_tok.unsqueeze(1)
 
             inp_tok_vec = self.in_embed(inp_tok)
             inp_tok_vec = self.drop(inp_tok_vec)
+            
             hid_o, hid_n = self.rnn(inp_tok_vec, torch.cat((hid_n, ses_encoding), 2))
             hid_n = hid_n[:, :, :self.hid_size]
-
-            lm_o, lm_hid = self.lm(out_tok_vec, lm_hid)
-            hid_o = self.projection(self.lin2(hid_o))
-            lm_o = self.lm_projection(lm_o)
-
+            hid_o = torch.matmul(self.lin2(hid_o).squeeze(1), self.out_embed.weight.transpose(0, 1))
+            hid_o = hid_o.unsqueeze(1)
+            
+            lm_o, lm_hid = self.lm(inp_tok_vec, lm_hid)
+            # extra experimental layer introduced
+            lm_o = self.drop(lm_o)
+            lm_o = torch.matmul(self.lin3(lm_o).squeeze(1), self.out_embed.weight.transpose(0, 1))
+            lm_o = lm_o.unsqueeze(1)
+            
             lm_preds.append(lm_o)
             preds.append(hid_o)
 
             final_hid_o = hid_o + lm_o
             # here we do greedy decoding
-            op = self.log_soft2(final_hid_o)
-            max_val, max_ind = torch.max(op, dim=2)
-            inp_tok = max_ind.clone()
-            out_tok_vec = self.out_embed(inp_tok)
+            # so we can ignore the last symbol which is a padding token
+            # technically we don't need a softmax here as we just want to choose the max token, max score will result in max softmax.Duh! 
+            op = final_hid_o[:, :, :-1]
+            max_val, inp_tok = torch.max(op, dim=2) #now inp_tok will be val between 0 and 10002 ignoring padding_idx
 
         dec_o = torch.cat(preds, 1)
         dec_lmo = torch.cat(lm_preds, 1)
         return dec_o, dec_lmo
 
-    def forward(self, ses_encoding, x=None, x_lens=None, beam=5):
+    def forward(self, input):
+        if len(input) == 1:
+            ses_encoding = input
+            x, x_lens = None, None
+            beam = 5
+        elif len(input) == 3:
+            ses_encoding, x, x_lens = input
+            beam = 5
+        else:
+            ses_encoding, x, x_lens, beam = input
+            
         ses_encoding = self.tanh(self.lin1(ses_encoding))
         # indicator that we are doing inference
         if x is None:
@@ -166,18 +167,6 @@ class Decoder(nn.Module):
                     seq, score = c[0], c[1]
                     _target = Variable(torch.LongTensor([seq]), requires_grad=False)
                     dec_o, dec_lm = self.do_decode(1, len(seq), ses_encoding, _target)
-                    """
-                    dec_o = dec_o[:, :-1, :].contiguous().view(-1, dec_o.size(2))
-                    dec_lm = dec_lm[:, :-1, :].contiguous().view(-1, dec_lm.size(2))
-                    _target = _target[:, 1:].contiguous().view(-1)
-
-                    score_pt_s = torch.exp(-F.cross_entropy(dec_o, _target, size_average=False, ignore_index=10003))
-                    crt_weight = torch.zeros(len(seq))
-                    crt_weight[:self.antilm_param] = 1
-                    score_ut = torch.exp(-F.cross_entropy(dec_lm, _target, weight=crt_weight, size_average=False, ignore_index=10003))
-
-                    final_score = score_pt_s - self.lambda_param*score_ut + self.gamma_param*len(seq)
-                    """
 
                     op = F.softmax(dec_o, 2)
                     lm_op = F.softmax(dec_lm, 2)
@@ -189,7 +178,7 @@ class Decoder(nn.Module):
                     final_score = op - self.lambda_param*lm_op
                     final_score = final_score[:, -1, :]
                     final_score = final_score * (final_score >= 0).float()
-                    final_score += 1e-20
+                    final_score += 1e-30
                     # since we do a log later it will become NaN otherwise
                     topval, topind = final_score.topk(beam, 1)
 
@@ -203,21 +192,21 @@ class Decoder(nn.Module):
                             n_candidates.append((seq + [ctok], score + math.log(cval) - self.diversity_rate*(i+1)))
 
                 # hack to exponent sequence length by alpha-0.7
-                n_candidates.sort(key=lambda temp: temp[1] / (1.0*len(temp[0])**0.7), reverse=True)
+                n_candidates.sort(key=lambda temp: temp[1] / (1.0*len(temp[0])**1), reverse=True)
                 candidates = copy.copy(n_candidates[:beam])
                 n_candidates[:] = []
                 gen_len += 1
                 pbar.update(1)
             pbar.close()
             final_candids = final_candids + candidates
-            final_candids.sort(key=lambda temp: temp[1] / (1.0 * len(temp[0]) ** 0.7), reverse=True)
+            final_candids.sort(key=lambda temp: temp[1] / (1.0 * len(temp[0]) ** 1), reverse=True)
             return final_candids[:beam]
         else:
             if use_cuda:
                 x = x.cuda()
             siz, seq_len = x.size(0), x.size(1)
             ses_encoding = ses_encoding.view(self.num_lyr*self.direction, siz, self.hid_size)
-            dec_o, dec_lm = self.do_decode(siz, seq_len, ses_encoding, x if self.teacher_forcing else None)
+            dec_o, dec_lm = self.do_decode(siz, seq_len, ses_encoding, x)
             return dec_o, dec_lm
 
     def set_teacher_forcing(self, val):

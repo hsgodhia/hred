@@ -17,12 +17,12 @@ if use_cuda:
 
 def init_param(model):
     for name, param in model.named_parameters():
-        if name.startswith('rnn') and len(param.size()) >= 2:
+        if (name.startswith('rnn') or name.startswith('lm')) and len(param.size()) >= 2:
             init.orthogonal(param)
         else:
             init.normal(param, 0, 0.01)
 
-
+            
 def train(options, base_enc, ses_enc, dec):
     base_enc.train()
     ses_enc.train()
@@ -39,7 +39,7 @@ def train(options, base_enc, ses_enc, dec):
         init_param(ses_enc)
         init_param(dec)
 
-    train_dataset, valid_dataset = MovieTriples('train', 1000), MovieTriples('valid', 10)
+    train_dataset, valid_dataset = MovieTriples('train'), MovieTriples('valid')
     train_dataloader = DataLoader(train_dataset, batch_size=options.bt_siz, shuffle=True, num_workers=2,
                                   collate_fn=custom_collate_fn)
     valid_dataloader = DataLoader(valid_dataset, batch_size=options.bt_siz, shuffle=True, num_workers=2,
@@ -49,38 +49,49 @@ def train(options, base_enc, ses_enc, dec):
 
     optimizer = optim.Adam(all_params, options.lr)
     criteria = nn.CrossEntropyLoss(ignore_index=10003, size_average=False)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.1)
 
     if use_cuda:
         criteria.cuda()
-
+    
     for i in range(options.epoch):
-        tr_loss, num_words = 0, 0
+        scheduler.step()
+        tr_loss, tlm_loss, num_words = 0, 0, 0
         strt = time.time()
         for i_batch, sample_batch in enumerate(tqdm(train_dataloader)):
             u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], \
                                                     sample_batch[3], sample_batch[4], sample_batch[5]
-            o1, o2 = base_enc(u1, u1_lens), base_enc(u2, u2_lens)
+            o1, o2 = base_enc((u1, u1_lens)), base_enc((u2, u2_lens))
             qu_seq = torch.cat((o1, o2), 1)
             final_session_o = ses_enc(qu_seq)
             if use_cuda:
                 u3 = u3.cuda()
-            preds, lmpreds = dec(final_session_o, u3, u3_lens)  # of size (N, SEQLEN, DIM)
+            preds, lmpreds = dec([final_session_o, u3, u3_lens])  # of size (N, SEQLEN, DIM)
             lmpreds = lmpreds[:, :-1, :].contiguous().view(-1, lmpreds.size(2))
             preds = preds[:, :-1, :].contiguous().view(-1, preds.size(2))
             u3 = u3[:, 1:].contiguous().view(-1)
 
             loss = criteria(preds, u3)
             lm_loss = criteria(lmpreds, u3)
+            
             num_words += u3.ne(10003).long().sum().data[0]
-            tr_loss += loss.data[0] + lm_loss.data[0]
-
+            tr_loss += loss.data[0]
+            tlm_loss += lm_loss.data[0]
+            
             optimizer.zero_grad()
-            (lm_loss + loss).backward()
+            lm_loss.backward(retain_graph=True)
+            loss.backward()
+            
+            # normalize the grad whenever it crosses a threshold
+            for p in all_params:
+                param_norm = p.grad.data.norm()
+                if param_norm > 1:
+                    p.grad.data.mul_(1/param_norm)
+                    
             optimizer.step()
 
-            torch.nn.utils.clip_grad_norm(all_params, 1.0)
         vl_loss = calc_valid_loss(valid_dataloader, criteria, base_enc, ses_enc, dec)
-        print("Training loss {} Valid loss {}".format(tr_loss/num_words, vl_loss))
+        print("Training loss {} lm loss {} Valid loss {}".format(tr_loss/num_words, tlm_loss/num_words, vl_loss))
         print("epoch {} took {} mins".format(i+1, (time.time() - strt)/60.0))
         if i % 2 == 0 or i == options.epoch -1:
             torch.save(base_enc.state_dict(), options.name + '_enc_mdl.pth')
@@ -107,14 +118,14 @@ def inference_beam(dataloader, base_enc, ses_enc, dec, inv_dict, options):
     for i_batch, sample_batch in enumerate(dataloader):
         u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3], \
                                                 sample_batch[4], sample_batch[5]
-        o1, o2 = base_enc(u1, u1_lens), base_enc(u2, u2_lens)
+        o1, o2 = base_enc((u1, u1_lens)), base_enc((u2, u2_lens))
         qu_seq = torch.cat((o1, o2), 1)
 
         # if we need to decode the intermediate queries we may need the hidden states
         final_session_o = ses_enc(qu_seq)
 
         # forward(self, ses_encoding, x=None, x_lens=None, beam=5 ):
-        sent = dec(final_session_o, None, None, options.beam)
+        sent = dec((final_session_o, None, None, options.beam))
         # print(sent)
         print(tensor_to_sent(sent, inv_dict))
         # greedy true for below because only beam generates a tuple of sequence and probability
@@ -133,19 +144,18 @@ def calc_valid_loss(data_loader, criteria, base_enc, ses_enc, dec):
         if use_cuda:
             u3 = u3.cuda()
 
-        o1, o2 = base_enc(u1, u1_lens), base_enc(u2, u2_lens)
+        o1, o2 = base_enc((u1, u1_lens)), base_enc((u2, u2_lens))
         qu_seq = torch.cat((o1, o2), 1)
         final_session_o = ses_enc(qu_seq)
 
-        preds, lmpreds = dec(final_session_o, u3, u3_lens)
+        preds, lmpreds = dec((final_session_o, u3, u3_lens))
         preds = preds[:, :-1, :].contiguous().view(-1, preds.size(2))
         lmpreds = lmpreds[:, :-1, :].contiguous().view(-1, lmpreds.size(2))
         u3 = u3[:, 1:].contiguous().view(-1)
 
-        loss = criteria(preds, u3)
-        lm_loss = criteria(lmpreds, u3)
+        loss = criteria(preds + lmpreds, u3)
         num_words += u3.ne(10003).long().sum().data[0]
-        valid_loss += loss.data[0] + lm_loss.data[0]
+        valid_loss += loss.data[0]
 
     base_enc.train()
     ses_enc.train()
@@ -188,9 +198,9 @@ def data_to_seq():
 
 def main():
     print('torch version {}'.format(torch.__version__))
-
+    _dict_file = '/home/harshals/hed-dlg/Data/MovieTriples/Training.dict.pkl'
     # we use a common dict for all test, train and validation
-    _dict_file = '/home/harshal/code/research/hred/data/MovieTriples_Dataset/Training.dict.pkl'
+    
     with open(_dict_file, 'rb') as fp2:
         dict_data = pickle.load(fp2)
     # dictionary data is like ('</s>', 2, 588827, 785135)
@@ -227,7 +237,7 @@ def main():
     if not options.test:
         train(options, base_enc, ses_enc, dec)
     # chooses 10 examples only
-    bt_siz, test_dataset = 1, MovieTriples('test', 10)
+    bt_siz, test_dataset = 1, MovieTriples('test', 100)
     test_dataloader = DataLoader(test_dataset, bt_siz, shuffle=True, num_workers=2, collate_fn=custom_collate_fn)
     inference_beam(test_dataloader, base_enc, ses_enc, dec, inv_dict, options)
 
