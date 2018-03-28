@@ -29,11 +29,12 @@ def train(options, base_enc, ses_enc, dec):
     dec.train()
 
     all_params = list(base_enc.parameters()) + list(ses_enc.parameters()) + list(dec.parameters())
-
+    optimizer = optim.Adam(all_params, options.lr)
     if options.btstrp:
         load_model_state(base_enc, options.btstrp + "_enc_mdl.pth")
         load_model_state(ses_enc, options.btstrp + "_ses_mdl.pth")
         load_model_state(dec, options.btstrp + "_dec_mdl.pth")
+        load_model_state(optimizer, options.btstrp + "_opti_st.pth")
     else:
         init_param(base_enc)
         init_param(ses_enc)
@@ -47,7 +48,7 @@ def train(options, base_enc, ses_enc, dec):
 
     print("Training set {} Validation set {}".format(len(train_dataset), len(valid_dataset)))
 
-    optimizer = optim.Adam(all_params, options.lr)
+    
     criteria = nn.CrossEntropyLoss(ignore_index=10003, size_average=False)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.1)
 
@@ -73,14 +74,18 @@ def train(options, base_enc, ses_enc, dec):
 
             loss = criteria(preds, u3)
             lm_loss = criteria(lmpreds, u3)
-            
-            num_words += u3.ne(10003).long().sum().data[0]
+            target_toks = u3.ne(10003).long().sum().data[0]
+            num_words += target_toks
             tr_loss += loss.data[0]
             tlm_loss += lm_loss.data[0]
             
+            loss = loss/target_toks
+            lm_loss = lm_loss/target_toks
+            
             optimizer.zero_grad()
-            lm_loss.backward(retain_graph=True)
-            loss.backward()
+            
+            loss.backward(retain_graph=True)
+            lm_loss.backward()
             
             # normalize the grad whenever it crosses a threshold
             for p in all_params:
@@ -92,7 +97,7 @@ def train(options, base_enc, ses_enc, dec):
 
         vl_loss = calc_valid_loss(valid_dataloader, criteria, base_enc, ses_enc, dec)
         print("Training loss {} lm loss {} Valid loss {}".format(tr_loss/num_words, tlm_loss/num_words, vl_loss))
-        print("epoch {} took {} mins".format(i+1, (time.time() - strt)/60.0))
+        print("epoch {} took {} miss".format(i+1, (time.time() - strt)/60.0))
         if i % 2 == 0 or i == options.epoch -1:
             torch.save(base_enc.state_dict(), options.name + '_enc_mdl.pth')
             torch.save(ses_enc.state_dict(), options.name + '_ses_mdl.pth')
@@ -118,6 +123,8 @@ def inference_beam(dataloader, base_enc, ses_enc, dec, inv_dict, options):
     for i_batch, sample_batch in enumerate(dataloader):
         u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3], \
                                                 sample_batch[4], sample_batch[5]
+            
+        
         o1, o2 = base_enc((u1, u1_lens)), base_enc((u2, u2_lens))
         qu_seq = torch.cat((o1, o2), 1)
 
@@ -150,10 +157,10 @@ def calc_valid_loss(data_loader, criteria, base_enc, ses_enc, dec):
 
         preds, lmpreds = dec((final_session_o, u3, u3_lens))
         preds = preds[:, :-1, :].contiguous().view(-1, preds.size(2))
-        lmpreds = lmpreds[:, :-1, :].contiguous().view(-1, lmpreds.size(2))
         u3 = u3[:, 1:].contiguous().view(-1)
-
-        loss = criteria(preds + lmpreds, u3)
+        
+        # do not include the lM loss, exp(loss) is perplexity
+        loss = criteria(preds, u3)
         num_words += u3.ne(10003).long().sum().data[0]
         valid_loss += loss.data[0]
 
@@ -217,6 +224,7 @@ def main():
     parser.add_argument('-tc', dest='teacher', action='store_true', default=False, help='default teacher forcing')
     parser.add_argument('-bi', dest='bidi', action='store_true', default=False, help='bidirectional enc/decs')
     parser.add_argument('-test', dest='test', action='store_true', default=False, help='only test or inference')
+    parser.add_argument('-shrd_dec_emb', dest='shrd_dec_emb', action='store_true', default=False, help='shared embedding in/out for decoder')
     parser.add_argument('-btstrp', dest='btstrp', default=None, help='bootstrap/load parameters give name')
     parser.add_argument('-nl', dest='num_lyr', type=int, default=1, help='number of enc/dec layers(same for both)')
     parser.add_argument('-lr', dest='lr', type=float, default=0.001, help='learning rate for optimizer')
@@ -226,9 +234,9 @@ def main():
     options = parser.parse_args()
     print(options)
 
-    base_enc = BaseEncoder(10004, 300, 1000, options.num_lyr, options.bidi)
-    ses_enc = SessionEncoder(1500, 1000, options.num_lyr, options.bidi)
-    dec = Decoder(10004, 300, 1500, 1000, options.num_lyr, options.bidi, options.teacher)
+    base_enc = BaseEncoder(10004, 300, 1000, options)
+    ses_enc = SessionEncoder(1500, 1000, options)
+    dec = Decoder(10004, 300, 1500, 1000, options)
     if use_cuda:
         base_enc.cuda()
         ses_enc.cuda()
