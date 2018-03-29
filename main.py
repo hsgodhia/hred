@@ -17,12 +17,22 @@ if use_cuda:
 
 def init_param(model):
     for name, param in model.named_parameters():
-        if (name.startswith('rnn') or name.startswith('lm')) and len(param.size()) >= 2:
+        # skip over the embeddings so that the padding index ones are 0
+        if name.startswith('embed'):
+            continue
+        elif (name.startswith('rnn') or name.startswith('lm')) and len(param.size()) >= 2:
             init.orthogonal(param)
         else:
             init.normal(param, 0, 0.01)
 
-            
+def clip_gnorm(model):
+    for name, p  in model.named_parameters():
+        if name.startswith('lm') or name.startswith('lin3'):
+            continue
+        param_norm = p.grad.data.norm()
+        if param_norm > 1:
+            p.grad.data.mul_(1/param_norm)
+                    
 def train(options, base_enc, ses_enc, dec):
     base_enc.train()
     ses_enc.train()
@@ -83,16 +93,13 @@ def train(options, base_enc, ses_enc, dec):
             lm_loss = lm_loss/target_toks
             
             optimizer.zero_grad()
-            
             loss.backward(retain_graph=True)
             lm_loss.backward()
             
-            # normalize the grad whenever it crosses a threshold
-            for p in all_params:
-                param_norm = p.grad.data.norm()
-                if param_norm > 1:
-                    p.grad.data.mul_(1/param_norm)
-                    
+            clip_gnorm(base_enc)
+            clip_gnorm(ses_enc)
+            clip_gnorm(dec)
+            
             optimizer.step()
 
         vl_loss = calc_valid_loss(valid_dataloader, criteria, base_enc, ses_enc, dec)
@@ -119,6 +126,7 @@ def inference_beam(dataloader, base_enc, ses_enc, dec, inv_dict, options):
     base_enc.eval()
     ses_enc.eval()
     dec.eval()
+    dec.set_teacher_forcing(False)
 
     for i_batch, sample_batch in enumerate(dataloader):
         u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3], \
@@ -143,7 +151,9 @@ def calc_valid_loss(data_loader, criteria, base_enc, ses_enc, dec):
     base_enc.eval()
     ses_enc.eval()
     dec.eval()
-
+    cur_tc = dec.get_teacher_forcing()
+    dec.set_teacher_forcing(False)
+    
     valid_loss, num_words = 0, 0
     for i_batch, sample_batch in enumerate(data_loader):
         u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3], \
@@ -167,7 +177,8 @@ def calc_valid_loss(data_loader, criteria, base_enc, ses_enc, dec):
     base_enc.train()
     ses_enc.train()
     dec.train()
-
+    dec.set_teacher_forcing(cur_tc)
+    
     return valid_loss/num_words
 
 
