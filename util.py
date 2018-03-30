@@ -13,7 +13,7 @@ def custom_collate_fn(batch):
     # input is a list of dialogturn objects
     bt_siz = len(batch)
     # sequence length only affects the memory requirement, otherwise longer is better
-    pad_idx, max_seq_len = 10003, 100
+    pad_idx, max_seq_len = 10003, 120
 
     u1_batch, u2_batch, u3_batch = [], [], []
     u1_lens, u2_lens, u3_lens = np.zeros(bt_siz, dtype=int), np.zeros(bt_siz, dtype=int), np.zeros(bt_siz, dtype=int)
@@ -42,9 +42,9 @@ def custom_collate_fn(batch):
 
     t1, t2, t3 = u1_batch, u2_batch, u3_batch
 
-    u1_batch = Variable(torch.ones(bt_siz, l_u1).long() * pad_idx, requires_grad=False)
-    u2_batch = Variable(torch.ones(bt_siz, l_u2).long() * pad_idx, requires_grad=False)
-    u3_batch = Variable(torch.ones(bt_siz, l_u3).long() * pad_idx, requires_grad=False)
+    u1_batch = Variable(torch.ones(bt_siz, l_u1).long() * pad_idx)
+    u2_batch = Variable(torch.ones(bt_siz, l_u2).long() * pad_idx)
+    u3_batch = Variable(torch.ones(bt_siz, l_u3).long() * pad_idx)
     end_tok = torch.LongTensor([2])
 
     for i in range(bt_siz):

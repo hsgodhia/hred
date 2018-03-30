@@ -18,37 +18,27 @@ if use_cuda:
 def init_param(model):
     for name, param in model.named_parameters():
         # skip over the embeddings so that the padding index ones are 0
-        if name.startswith('embed'):
+        if 'embed' in name:
             continue
-        elif (name.startswith('rnn') or name.startswith('lm')) and len(param.size()) >= 2:
+        elif ('rnn' in name or 'lm' in name) and len(param.size()) >= 2:
             init.orthogonal(param)
         else:
             init.normal(param, 0, 0.01)
 
 def clip_gnorm(model):
     for name, p  in model.named_parameters():
-        if name.startswith('lm') or name.startswith('lin3'):
-            continue
         param_norm = p.grad.data.norm()
         if param_norm > 1:
             p.grad.data.mul_(1/param_norm)
                     
-def train(options, base_enc, ses_enc, dec):
-    base_enc.train()
-    ses_enc.train()
-    dec.train()
-
-    all_params = list(base_enc.parameters()) + list(ses_enc.parameters()) + list(dec.parameters())
-    optimizer = optim.Adam(all_params, options.lr)
+def train(options, model):
+    model.train()
+    optimizer = optim.Adam(model.parameters(), options.lr)
     if options.btstrp:
-        load_model_state(base_enc, options.btstrp + "_enc_mdl.pth")
-        load_model_state(ses_enc, options.btstrp + "_ses_mdl.pth")
-        load_model_state(dec, options.btstrp + "_dec_mdl.pth")
-        load_model_state(optimizer, options.btstrp + "_opti_st.pth")
+        load_model_state(model, options.btstrp + "_mdl.pth")
+        load_model_state(optimizer, options.btstrp + "_opti.pth")
     else:
-        init_param(base_enc)
-        init_param(ses_enc)
-        init_param(dec)
+        init_param(model)
 
     train_dataset, valid_dataset = MovieTriples('train'), MovieTriples('valid')
     train_dataloader = DataLoader(train_dataset, batch_size=options.bt_siz, shuffle=True, num_workers=2,
@@ -60,124 +50,144 @@ def train(options, base_enc, ses_enc, dec):
 
     
     criteria = nn.CrossEntropyLoss(ignore_index=10003, size_average=False)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.1)
-
     if use_cuda:
         criteria.cuda()
     
     for i in range(options.epoch):
-        scheduler.step()
         tr_loss, tlm_loss, num_words = 0, 0, 0
         strt = time.time()
         for i_batch, sample_batch in enumerate(tqdm(train_dataloader)):
-            u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], \
-                                                    sample_batch[3], sample_batch[4], sample_batch[5]
-            o1, o2 = base_enc((u1, u1_lens)), base_enc((u2, u2_lens))
-            qu_seq = torch.cat((o1, o2), 1)
-            final_session_o = ses_enc(qu_seq)
+            preds, lmpreds = model(sample_batch)
+            u3 = sample_batch[4]
             if use_cuda:
                 u3 = u3.cuda()
-            preds, lmpreds = dec([final_session_o, u3, u3_lens])  # of size (N, SEQLEN, DIM)
-            lmpreds = lmpreds[:, :-1, :].contiguous().view(-1, lmpreds.size(2))
+                
             preds = preds[:, :-1, :].contiguous().view(-1, preds.size(2))
             u3 = u3[:, 1:].contiguous().view(-1)
 
             loss = criteria(preds, u3)
-            lm_loss = criteria(lmpreds, u3)
             target_toks = u3.ne(10003).long().sum().data[0]
+            
             num_words += target_toks
             tr_loss += loss.data[0]
-            tlm_loss += lm_loss.data[0]
-            
             loss = loss/target_toks
-            lm_loss = lm_loss/target_toks
+            
+            if options.lm:
+                lmpreds = lmpreds[:, :-1, :].contiguous().view(-1, lmpreds.size(2))
+                lm_loss = criteria(lmpreds, u3)
+                tlm_loss += lm_loss.data[0]
+                lm_loss = lm_loss/target_toks
             
             optimizer.zero_grad()
             loss.backward(retain_graph=True)
-            lm_loss.backward()
-            
-            clip_gnorm(base_enc)
-            clip_gnorm(ses_enc)
-            clip_gnorm(dec)
-            
+            if options.lm:
+                lm_loss.backward()
+            clip_gnorm(model)
             optimizer.step()
 
-        vl_loss = calc_valid_loss(valid_dataloader, criteria, base_enc, ses_enc, dec)
+        vl_loss = calc_valid_loss(valid_dataloader, criteria, model)
         print("Training loss {} lm loss {} Valid loss {}".format(tr_loss/num_words, tlm_loss/num_words, vl_loss))
         print("epoch {} took {} miss".format(i+1, (time.time() - strt)/60.0))
         if i % 2 == 0 or i == options.epoch -1:
-            torch.save(base_enc.state_dict(), options.name + '_enc_mdl.pth')
-            torch.save(ses_enc.state_dict(), options.name + '_ses_mdl.pth')
-            torch.save(dec.state_dict(), options.name + '_dec_mdl.pth')
+            torch.save(model.state_dict(), options.name + '_mdl.pth')
             torch.save(optimizer.state_dict(), options.name + '_opti_st.pth')
 
 
 def load_model_state(mdl, fl):
     saved_state = torch.load(fl)
     mdl.load_state_dict(saved_state)
+    
+    
+def generate(model, ses_encoding, beam, diversity_rate):
+    n_candidates, final_candids = [], []
+    candidates = [([1], 0, 0)]
+    gen_len, max_gen_len = 1, 20
+    pbar = tqdm(total=max_gen_len)
 
+
+    # we provide the top k options/target defined each time
+    while gen_len <= max_gen_len:
+        for c in candidates:
+            seq, pts_score, pt_score = c[0], c[1], c[2]
+            _target = Variable(torch.LongTensor([seq]), volatile=True)
+            dec_o, _ = model.dec([ses_encoding, _target, [len(seq)]])
+            dec_o = dec_o[:, :, :-1]
+
+            op = F.log_softmax(dec_o, 2, 5)
+            op = op[:, -1, :]
+            topval, topind = op.topk(beam, 1)
+
+            for i in range(beam):
+                ctok, cval = topind.data[0, i], topval.data[0, i]
+                if ctok == 2:
+                    list_to_append = final_candids
+                else:
+                    list_to_append = n_candidates
+
+                list_to_append.append((seq + [ctok], pts_score + cval - diversity_rate*(i+1), 0))
+
+        n_candidates.sort(key=lambda temp: temp[1]/len(temp[0]), reverse=True)
+        candidates = copy.copy(n_candidates[:beam])
+        n_candidates[:] = []
+        gen_len += 1
+        pbar.update(1)
+
+    pbar.close()
+    final_candids = final_candids + candidates
+    final_candids.sort(key=lambda temp: temp[1]/len(temp[0]), reverse=True)
+
+    return final_candids[:beam]    
 
 # sample a sentence from the test set by using beam search
-def inference_beam(dataloader, base_enc, ses_enc, dec, inv_dict, options):
-    load_model_state(base_enc, options.name + "_enc_mdl.pth")
-    load_model_state(ses_enc, options.name + "_ses_mdl.pth")
-    load_model_state(dec, options.name + "_dec_mdl.pth")
-
-    base_enc.eval()
-    ses_enc.eval()
-    dec.eval()
-    dec.set_teacher_forcing(False)
+def inference_beam(dataloader, model, inv_dict, options):
+    cur_tc = model.dec.get_teacher_forcing()
+    model.dec.set_teacher_forcing(True)
+    
+    load_model_state(model, options.name + "_mdl.pth")
+    model.eval()
+    diversity_rate = 1
+    antilm_param = 20
+    lambda_param = 0.4
 
     for i_batch, sample_batch in enumerate(dataloader):
         u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3], \
                                                 sample_batch[4], sample_batch[5]
             
         
-        o1, o2 = base_enc((u1, u1_lens)), base_enc((u2, u2_lens))
+        o1, o2 = model.base_enc((u1, u1_lens)), model.base_enc((u2, u2_lens))
         qu_seq = torch.cat((o1, o2), 1)
-
         # if we need to decode the intermediate queries we may need the hidden states
-        final_session_o = ses_enc(qu_seq)
-
+        final_session_o = model.ses_enc(qu_seq)
         # forward(self, ses_encoding, x=None, x_lens=None, beam=5 ):
-        sent = dec((final_session_o, None, None, options.beam))
+        sent = generate(model, final_session_o, options.beam, diversity_rate)
         # print(sent)
         print(tensor_to_sent(sent, inv_dict))
         # greedy true for below because only beam generates a tuple of sequence and probability
         print("Ground truth {} \n".format(tensor_to_sent(u3.data.cpu().numpy(), inv_dict, True)))
 
+    model.dec.set_teacher_forcing(cur_tc)
 
-def calc_valid_loss(data_loader, criteria, base_enc, ses_enc, dec):
-    base_enc.eval()
-    ses_enc.eval()
-    dec.eval()
-    cur_tc = dec.get_teacher_forcing()
-    dec.set_teacher_forcing(False)
+def calc_valid_loss(data_loader, criteria, model):
+    model.eval()
+    cur_tc = model.dec.get_teacher_forcing()
+    model.dec.set_teacher_forcing(True)
+    # we want to find the perplexity or likelihood of the provided sequence
     
     valid_loss, num_words = 0, 0
     for i_batch, sample_batch in enumerate(data_loader):
-        u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3], \
-                                                sample_batch[4], sample_batch[5]
+        preds, lmpreds = model(sample_batch)
+        u3 = sample_batch[4]
         if use_cuda:
             u3 = u3.cuda()
-
-        o1, o2 = base_enc((u1, u1_lens)), base_enc((u2, u2_lens))
-        qu_seq = torch.cat((o1, o2), 1)
-        final_session_o = ses_enc(qu_seq)
-
-        preds, lmpreds = dec((final_session_o, u3, u3_lens))
         preds = preds[:, :-1, :].contiguous().view(-1, preds.size(2))
         u3 = u3[:, 1:].contiguous().view(-1)
-        
         # do not include the lM loss, exp(loss) is perplexity
         loss = criteria(preds, u3)
         num_words += u3.ne(10003).long().sum().data[0]
         valid_loss += loss.data[0]
 
-    base_enc.train()
-    ses_enc.train()
-    dec.train()
-    dec.set_teacher_forcing(cur_tc)
+    model.train()
+    model.dec.set_teacher_forcing(cur_tc)
     
     return valid_loss/num_words
 
@@ -237,6 +247,8 @@ def main():
     parser.add_argument('-test', dest='test', action='store_true', default=False, help='only test or inference')
     parser.add_argument('-shrd_dec_emb', dest='shrd_dec_emb', action='store_true', default=False, help='shared embedding in/out for decoder')
     parser.add_argument('-btstrp', dest='btstrp', default=None, help='bootstrap/load parameters give name')
+    parser.add_argument('-lm', dest='lm', action='store_true', default=False, help='enable a RNN language model joint training as well')
+    parser.add_argument('-drp', dest='drp', type=float, default=0.3, help='dropout probability used all throughout')
     parser.add_argument('-nl', dest='num_lyr', type=int, default=1, help='number of enc/dec layers(same for both)')
     parser.add_argument('-lr', dest='lr', type=float, default=0.001, help='learning rate for optimizer')
     parser.add_argument('-bs', dest='bt_siz', type=int, default=100, help='batch size')
@@ -245,20 +257,16 @@ def main():
     options = parser.parse_args()
     print(options)
 
-    base_enc = BaseEncoder(10004, 300, 1000, options)
-    ses_enc = SessionEncoder(1500, 1000, options)
-    dec = Decoder(10004, 300, 1500, 1000, options)
+    model = Seq2Seq(options)
     if use_cuda:
-        base_enc.cuda()
-        ses_enc.cuda()
-        dec.cuda()
+        model.cuda()
 
     if not options.test:
-        train(options, base_enc, ses_enc, dec)
+        train(options, model)
     # chooses 10 examples only
     bt_siz, test_dataset = 1, MovieTriples('test', 100)
     test_dataloader = DataLoader(test_dataset, bt_siz, shuffle=True, num_workers=2, collate_fn=custom_collate_fn)
-    inference_beam(test_dataloader, base_enc, ses_enc, dec, inv_dict, options)
+    inference_beam(test_dataloader, model, inv_dict, options)
 
 
 main()
