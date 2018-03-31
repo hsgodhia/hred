@@ -24,16 +24,17 @@ def max_out(x):
 class Seq2Seq(nn.Module):
     def __init__(self, options):
         super(Seq2Seq, self).__init__()
-        self.base_enc = BaseEncoder(10004, 400, 1500, options)
-        self.ses_enc = SessionEncoder(2000, 1500, options)
-        self.dec = Decoder(10004, 500, 2000, 1500, options)
+        self.base_enc = BaseEncoder(10004, 300, 1000, options)
+        self.ses_enc = SessionEncoder(1500, 1000, options)
+        self.dec = Decoder(10004, 300, 1500, 1000, options)
         
     def forward(self, sample_batch):
         u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], \
         sample_batch[3], sample_batch[4], sample_batch[5]
         if use_cuda:
+            u1 = u1.cuda()
+            u2 = u2.cuda()
             u3 = u3.cuda()
-        
         o1, o2 = self.base_enc((u1, u1_lens)), self.base_enc((u2, u2_lens))
         qu_seq = torch.cat((o1, o2), 1)
         final_session_o = self.ses_enc(qu_seq)
@@ -60,14 +61,15 @@ class BaseEncoder(nn.Module):
         bt_siz, seq_len = x.size(0), x.size(1)
         h_0 = Variable(torch.zeros(self.direction * self.num_lyr, bt_siz, self.hid_size))
         if use_cuda:
-            x = x.cuda()
             h_0 = h_0.cuda()
         x_emb = self.embed(x)
         x_emb = self.drop(x_emb)
         x_emb = torch.nn.utils.rnn.pack_padded_sequence(x_emb, x_lens, batch_first=True)
         x_o, x_hid = self.rnn(x_emb, h_0)
-        x_o, _ = torch.nn.utils.rnn.pad_packed_sequence(x_o, batch_first=True)
-        return x_o[:, -1, :].unsqueeze(1)
+        # x_o, _ = torch.nn.utils.rnn.pad_packed_sequence(x_o, batch_first=True)
+        # using x_o and returning x_o[:, -1, :].unsqueeze(1) is wrong coz its all 0s careful! it doesn't adjust for variable timesteps
+        x_hid = x_hid.view(bt_siz, -1, self.hid_size)
+        return x_hid
 
 
 # encode the hidden states of a number of utterances
@@ -86,7 +88,6 @@ class SessionEncoder(nn.Module):
             h_0 = h_0.cuda()
         # output, h_n for output batch is already dim 0
         h_o, h_n = self.rnn(x, h_0)
-        
         h_n = h_n.view(x.size(0), -1, self.hid_size)
         return h_n
 
@@ -119,15 +120,13 @@ class Decoder(nn.Module):
         self.train_lm = options.lm
 
     def do_decode_tc(self, ses_encoding, target, target_lens):
-        if use_cuda:
-            target = target.cuda()
-                
         target_emb = self.embed_in(target)
         target_emb = self.drop(target_emb)
         target_emb = torch.nn.utils.rnn.pack_padded_sequence(target_emb, target_lens, batch_first=True)
         
         hid_o, hid_n = self.rnn(target_emb, ses_encoding)
         hid_o, _ = torch.nn.utils.rnn.pad_packed_sequence(hid_o, batch_first=True)
+        # linear layers not compatible with PackedSequence need to unpack, will be 0s at 10003 timesteps!
         hid_o = self.lin2(hid_o)
         hid_o = F.linear(hid_o, self.embed_in.weight) if self.shared_weight else self.embed_out(hid_o)
         

@@ -36,7 +36,7 @@ def train(options, model):
     optimizer = optim.Adam(model.parameters(), options.lr)
     if options.btstrp:
         load_model_state(model, options.btstrp + "_mdl.pth")
-        load_model_state(optimizer, options.btstrp + "_opti.pth")
+        load_model_state(optimizer, options.btstrp + "_opti_st.pth")
     else:
         init_param(model)
 
@@ -126,7 +126,7 @@ def generate(model, ses_encoding, beam, diversity_rate):
 
                 list_to_append.append((seq + [ctok], pts_score + cval - diversity_rate*(i+1), 0))
 
-        n_candidates.sort(key=lambda temp: temp[1]/len(temp[0]), reverse=True)
+        n_candidates.sort(key=lambda temp: temp[1]/len(temp[0])**0.7, reverse=True)
         candidates = copy.copy(n_candidates[:beam])
         n_candidates[:] = []
         gen_len += 1
@@ -134,7 +134,7 @@ def generate(model, ses_encoding, beam, diversity_rate):
 
     pbar.close()
     final_candids = final_candids + candidates
-    final_candids.sort(key=lambda temp: temp[1]/len(temp[0]), reverse=True)
+    final_candids.sort(key=lambda temp: temp[1]/len(temp[0])**0.7, reverse=True)
 
     return final_candids[:beam]    
 
@@ -145,7 +145,7 @@ def inference_beam(dataloader, model, inv_dict, options):
     
     load_model_state(model, options.name + "_mdl.pth")
     model.eval()
-    diversity_rate = 1
+    diversity_rate = 2
     antilm_param = 20
     lambda_param = 0.4
 
@@ -153,7 +153,9 @@ def inference_beam(dataloader, model, inv_dict, options):
         u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3], \
                                                 sample_batch[4], sample_batch[5]
             
-        
+        if use_cuda:
+            u1 = u1.cuda()
+            u2 = u2.cuda()
         o1, o2 = model.base_enc((u1, u1_lens)), model.base_enc((u2, u2_lens))
         qu_seq = torch.cat((o1, o2), 1)
         # if we need to decode the intermediate queries we may need the hidden states
