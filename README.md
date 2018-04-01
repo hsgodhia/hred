@@ -18,8 +18,10 @@ A brief list of options is given below, for a longer list please see main.py fil
 #### Notes
  - Greedy decoding is used during training time if teacher forcing is disabled
  - During inference time the MMI-antiLM score is computed as per equation (15) in Jiwei Li (Diversity Promoting Paper)
- - an LM loss is by default included (through an additional plain RNN) and this jointly trained with the other parameters 
+ - an LM loss is by default included (through an additional plain RNN) and this jointly trained with the other parameters, although not much difference in results are obtained and to speedup I often disable it, also the score from LM are not included in calculating the loss/perplexity
  - When processing the data, diverse sequence lengths in a given batch leads to better optimization so no sorting of training data
+ - Validation/test perplexity is calculated using teacher forcing as we want to capture the true work log likelihood
+ - Inference or generation is using beam search
  
 #### Sanity check:-
 
@@ -36,6 +38,8 @@ The model is *able to replicate the results* of the paper. Re-run the command
 `
  - We notice over fitting from epoch 8 onwards as per validation perplexity 
  - Stopping at epoch 7 gives a training loss 3.367  valid loss 3.5708 and a test loss of 3.559. Given that exp(loss) is perplexity this results in **test perplexity of 35.873**
+ - Training time is about 9 mins per epoch on a Tesla Geforce GTX Titan X consuming about 4GB of GPU RAM
+ - The model checkpoint binary can be obtained from [here](https://nofile.io/f/oXmX0zozNHs/full_final2_mdl.pth)
  - Some sample results
  ```
 ("  i don ' t know .  ", -12.539569854736328), 
