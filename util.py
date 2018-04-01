@@ -13,7 +13,7 @@ def custom_collate_fn(batch):
     # input is a list of dialogturn objects
     bt_siz = len(batch)
     # sequence length only affects the memory requirement, otherwise longer is better
-    pad_idx, max_seq_len = 10003, 120
+    pad_idx, max_seq_len = 10003, 160
 
     u1_batch, u2_batch, u3_batch = [], [], []
     u1_lens, u2_lens, u3_lens = np.zeros(bt_siz, dtype=int), np.zeros(bt_siz, dtype=int), np.zeros(bt_siz, dtype=int)
@@ -146,9 +146,10 @@ class MovieTriples(Dataset):
             data = pickle.load(fp)
             for d in data:
                 self.utterance_data.append(DialogTurn(d))
-        self.utterance_data.sort(key=cmp_to_key(cmp_dialog))
+        # it helps in optimization that the batch be diverse, definitely helps!
+        # self.utterance_data.sort(key=cmp_to_key(cmp_dialog))
         if length:
-            self.utterance_data = self.utterance_data[1000:1000 + length]
+            self.utterance_data = self.utterance_data[2000:2000 + length]
 
     def __len__(self):
         return len(self.utterance_data)

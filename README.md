@@ -29,8 +29,10 @@ A brief list of options is given below, for a longer list please see main.py fil
 
  - If you load a small training set, like 1000 training and 100 valid as here `train_dataset, valid_dataset = MovieTriples('train', 1000), MovieTriples('valid', 100)` and train to overfit the model converges to 0.5 training loss in 50 epochs with training command `python3.6 main.py -n sample -bms 10 -e 50 -tc -lm`
  - Some samples generated at inference as compared to ground truth (on the test set) are
-  - ```
-  [("<s> i don ' t know . </s>", -11.935150146484375), ("<s> i ' m in from new york . i came to see <person> . </s>", -20.482309341430664), ("<s> i ' ll take you there , sir . </s>", -16.400659561157227), ("<s> i ' m sorry , but no one by that name lives here . </s>", -22.178613662719727), ("<s> i know it ' s none of my business -- </s>", -18.43322467803955), ("<s> i don ' t think you win elections by telling <number> percent of the people that they are . </s>", -27.444936752319336), ("<s> you ' re going to break up with <person> , aren ' t you ? </s>", -23.688961029052734), ("<s> i ' m afraid not . </s>", -14.662097930908203), ("<s> i don ' t know , do you ? <continued_utterance> it ' s a <person> . </s>", -25.888113021850586), ("<s> i ' ll be right back . </s>", -15.958183288574219)]
-Ground truth [("<s> what ' s bugging her ? </s>", 0)] 
-```
+    - 
+   ```
+   [("i don ' t know . ", -11.935150146484375), ("  i ' m in from new york . i came to see <person> .  ", -20.482309341430664), ("  i ' ll take you there , sir .  ", -16.400659561157227), ("  i ' m sorry , but no one by that name lives here .  ", -22.178613662719727), ("  i know it ' s none of my business --  ", -18.43322467803955), ("  i don ' t think you win elections by telling <number> percent of the people that they are .  ", -27.444936752319336), ("  you ' re going to break up with <person> , aren ' t you ?  ", -23.688961029052734), ("  i ' m afraid not .  ", -14.662097930908203), ("  i don ' t know , do you ? <continued_utterance> it ' s a <person> .  ", -25.888113021850586), ("  i ' ll be right back .  ", -15.958183288574219)]
+Ground truth [("  what ' s bugging her ?  ", 0)] 
+
+   ```
  

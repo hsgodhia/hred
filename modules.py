@@ -24,9 +24,9 @@ def max_out(x):
 class Seq2Seq(nn.Module):
     def __init__(self, options):
         super(Seq2Seq, self).__init__()
-        self.base_enc = BaseEncoder(10004, 300, 1000, options)
-        self.ses_enc = SessionEncoder(1500, 1000, options)
-        self.dec = Decoder(10004, 300, 1500, 1000, options)
+        self.base_enc = BaseEncoder(10004, 300, 600, options)
+        self.ses_enc = SessionEncoder(600, 600, options)
+        self.dec = Decoder(10004, 300, 600, 600, options)
         
     def forward(self, sample_batch):
         u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], \
@@ -66,6 +66,13 @@ class BaseEncoder(nn.Module):
         x_emb = self.drop(x_emb)
         x_emb = torch.nn.utils.rnn.pack_padded_sequence(x_emb, x_lens, batch_first=True)
         x_o, x_hid = self.rnn(x_emb, h_0)
+        # assuming dimension 0, 1 is for layer 1 and 2, 3 for layer 2
+        if self.direction == 2:
+            x_hids = []
+            for i in range(self.num_lyr):
+                x_hid_temp = x_hid[i, :, :] + x_hid[i+1, :, :]
+                x_hids.append(x_hid_temp)
+            x_hid = torch.cat(x_hids, 0)
         # x_o, _ = torch.nn.utils.rnn.pad_packed_sequence(x_o, batch_first=True)
         # using x_o and returning x_o[:, -1, :].unsqueeze(1) is wrong coz its all 0s careful! it doesn't adjust for variable timesteps
         x_hid = x_hid.view(bt_siz, -1, self.hid_size)
@@ -78,12 +85,11 @@ class SessionEncoder(nn.Module):
         super(SessionEncoder, self).__init__()
         self.hid_size = hid_size
         self.num_lyr = options.num_lyr
-        self.direction = 2 if options.bidi else 1
         self.rnn = nn.GRU(hidden_size=hid_size, input_size=inp_size,
-                          num_layers=options.num_lyr, bidirectional=options.bidi, batch_first=True, dropout=options.drp)
+                          num_layers=options.num_lyr, bidirectional=False, batch_first=True, dropout=options.drp)
 
     def forward(self, x):
-        h_0 = Variable(torch.zeros(self.direction * self.num_lyr, x.size(0), self.hid_size))
+        h_0 = Variable(torch.zeros(self.num_lyr, x.size(0), self.hid_size))
         if use_cuda:
             h_0 = h_0.cuda()
         # output, h_n for output batch is already dim 0
@@ -112,10 +118,9 @@ class Decoder(nn.Module):
         self.lin2 = nn.Linear(self.hid_size, emb_size, False)
         
         if options.lm:
-            self.lm = nn.GRU(input_size=self.emb_size, hidden_size=self.hid_size, num_layers=self.num_lyr, batch_first=True, dropout=options.drp)
+            self.lm = nn.GRU(input_size=self.emb_size, hidden_size=self.hid_size, num_layers=self.num_lyr, batch_first=True, dropout=options.drp, bidirectional=False)
             self.lin3 = nn.Linear(self.hid_size, emb_size, False)
         
-        self.direction = 2 if options.bidi else 1
         self.teacher_forcing = options.teacher
         self.train_lm = options.lm
 
@@ -132,7 +137,7 @@ class Decoder(nn.Module):
         
         if self.train_lm:
             siz = target.size(0)
-            lm_hid0 = Variable(torch.zeros(self.direction * self.num_lyr, siz, self.hid_size))
+            lm_hid0 = Variable(torch.zeros(self.num_lyr, siz, self.hid_size))
             if use_cuda:
                 lm_hid0 = lm_hid0.cuda()
 
@@ -148,7 +153,7 @@ class Decoder(nn.Module):
     def do_decode(self, siz, seq_len, ses_encoding):
         hid_n, preds, lm_preds = ses_encoding, [], []
         inp_tok = Variable(torch.ones(siz, 1).long())
-        lm_hid = Variable(torch.zeros(self.direction * self.num_lyr, siz, self.hid_size))
+        lm_hid = Variable(torch.zeros(self.num_lyr, siz, self.hid_size))
         if use_cuda:
             lm_hid = lm_hid.cuda()
             inp_tok = inp_tok.cuda()
@@ -192,11 +197,12 @@ class Decoder(nn.Module):
             ses_encoding, x, x_lens, beam = input
             
         ses_encoding = self.tanh(self.lin1(ses_encoding))
-        ses_encoding = self.drop(ses_encoding)
+        # you probably don't want to "drop" the conditioning vector
+        # ses_encoding = self.drop(ses_encoding)
         if use_cuda:
             x = x.cuda()
         siz, seq_len = x.size(0), x.size(1)
-        ses_encoding = ses_encoding.view(self.direction * self.num_lyr, siz, self.hid_size)
+        ses_encoding = ses_encoding.view(self.num_lyr, siz, self.hid_size)
         if self.teacher_forcing:
             dec_o, dec_lm = self.do_decode_tc(ses_encoding, x, x_lens)
         else:

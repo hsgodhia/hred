@@ -145,7 +145,7 @@ def inference_beam(dataloader, model, inv_dict, options):
     
     load_model_state(model, options.name + "_mdl.pth")
     model.eval()
-    diversity_rate = 2
+    diversity_rate = 1
     antilm_param = 20
     lambda_param = 0.4
 
