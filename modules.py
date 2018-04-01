@@ -24,9 +24,9 @@ def max_out(x):
 class Seq2Seq(nn.Module):
     def __init__(self, options):
         super(Seq2Seq, self).__init__()
-        self.base_enc = BaseEncoder(10004, 300, 600, options)
-        self.ses_enc = SessionEncoder(600, 600, options)
-        self.dec = Decoder(10004, 300, 600, 600, options)
+        self.base_enc = BaseEncoder(options.vocab_size, options.emb_size, options.ut_hid_size, options)
+        self.ses_enc = SessionEncoder(options.ses_hid_size, options.ut_hid_size, options)
+        self.dec = Decoder(options)
         
     def forward(self, sample_batch):
         u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], \
@@ -100,40 +100,56 @@ class SessionEncoder(nn.Module):
 
 # decode the hidden state
 class Decoder(nn.Module):
-    def __init__(self, vocab_size, emb_size, ses_hid_size, hid_size, options):
+    def __init__(self, options):
         super(Decoder, self).__init__()
-        self.emb_size = emb_size
-        self.hid_size = hid_size
+        self.emb_size = options.emb_size
+        self.hid_size = options.dec_hid_size
         self.num_lyr = options.num_lyr
-        self.drop = nn.Dropout(options.drp)
-        self.shared_weight = options.shrd_dec_emb
-        self.tanh = nn.Tanh()
-        self.embed_in = nn.Embedding(vocab_size, emb_size, padding_idx=10003, sparse=False)
-        if not self.shared_weight:
-            self.embed_out = nn.Linear(emb_size, vocab_size, bias=False)
+        self.teacher_forcing = options.teacher
+        self.train_lm = options.lm
         
-        self.rnn = nn.GRU(hidden_size=hid_size, input_size=emb_size,
-                          num_layers=self.num_lyr, bidirectional=False, batch_first=True, dropout=options.drp)
-        self.lin1 = nn.Linear(ses_hid_size, hid_size)
-        self.lin2 = nn.Linear(self.hid_size, emb_size, False)
+        self.drop = nn.Dropout(options.drp)
+        self.tanh = nn.Tanh()
+        self.shared_weight = options.shrd_dec_emb
+        
+        self.embed_in = nn.Embedding(options.vocab_size, self.emb_size, padding_idx=10003, sparse=False)
+        if not self.shared_weight:
+            self.embed_out = nn.Linear(self.emb_size, options.vocab_size, bias=False)
+        
+        self.rnn = nn.GRU(hidden_size=self.hid_size,input_size=self.emb_size,num_layers=self.num_lyr,batch_first=True,dropout=options.drp)
+        
+        self.ses_to_dec = nn.Linear(options.ses_hid_size, self.hid_size)
+        self.dec_inf = nn.Linear(self.hid_size, self.emb_size*2, False)
+        self.ses_inf = nn.Linear(options.ses_hid_size, self.emb_size*2, False)
+        self.emb_inf = nn.Linear(self.emb_size, self.emb_size*2, True)
         
         if options.lm:
             self.lm = nn.GRU(input_size=self.emb_size, hidden_size=self.hid_size, num_layers=self.num_lyr, batch_first=True, dropout=options.drp, bidirectional=False)
-            self.lin3 = nn.Linear(self.hid_size, emb_size, False)
-        
-        self.teacher_forcing = options.teacher
-        self.train_lm = options.lm
+            self.lin3 = nn.Linear(self.hid_size, self.emb_size, False)
 
     def do_decode_tc(self, ses_encoding, target, target_lens):
         target_emb = self.embed_in(target)
         target_emb = self.drop(target_emb)
+        # below will be used later as a crude approximation of an LM
+        emb_inf_vec = self.emb_inf(target_emb)
+        
         target_emb = torch.nn.utils.rnn.pack_padded_sequence(target_emb, target_lens, batch_first=True)
         
-        hid_o, hid_n = self.rnn(target_emb, ses_encoding)
+        init_hidn = self.tanh(self.ses_to_dec(ses_encoding))
+        init_hidn = init_hidn.view(self.num_lyr, target.size(0), self.hid_size)
+        # you probably don't want to "drop" the conditioning vector
+        hid_o, hid_n = self.rnn(target_emb, init_hidn)
+        
         hid_o, _ = torch.nn.utils.rnn.pad_packed_sequence(hid_o, batch_first=True)
         # linear layers not compatible with PackedSequence need to unpack, will be 0s at 10003 timesteps!
-        hid_o = self.lin2(hid_o)
-        hid_o = F.linear(hid_o, self.embed_in.weight) if self.shared_weight else self.embed_out(hid_o)
+        dec_hid_vec = self.dec_inf(hid_o)
+        ses_inf_vec = self.ses_inf(ses_encoding)
+        
+        
+        total_hid_o = dec_hid_vec + ses_inf_vec + emb_inf_vec
+        hid_o_mx = max_out(total_hid_o)
+        
+        hid_o_mx = F.linear(hid_o_mx, self.embed_in.weight) if self.shared_weight else self.embed_out(hid_o_mx)
         
         if self.train_lm:
             siz = target.size(0)
@@ -147,10 +163,12 @@ class Decoder(nn.Module):
             lm_o = F.linear(lm_o, self.embed_in.weight) if self.shared_weight else self.embed_out(lm_o)
             return hid_o, lm_o
         else:
-            return hid_o, None
+            return hid_o_mx, None
         
         
     def do_decode(self, siz, seq_len, ses_encoding):
+        ses_encoding = self.tanh(self.ses_to_dec(ses_encoding))
+        
         hid_n, preds, lm_preds = ses_encoding, [], []
         inp_tok = Variable(torch.ones(siz, 1).long())
         lm_hid = Variable(torch.zeros(self.num_lyr, siz, self.hid_size))
@@ -196,13 +214,10 @@ class Decoder(nn.Module):
         else:
             ses_encoding, x, x_lens, beam = input
             
-        ses_encoding = self.tanh(self.lin1(ses_encoding))
-        # you probably don't want to "drop" the conditioning vector
-        # ses_encoding = self.drop(ses_encoding)
         if use_cuda:
             x = x.cuda()
         siz, seq_len = x.size(0), x.size(1)
-        ses_encoding = ses_encoding.view(self.num_lyr, siz, self.hid_size)
+        
         if self.teacher_forcing:
             dec_o, dec_lm = self.do_decode_tc(ses_encoding, x, x_lens)
         else:

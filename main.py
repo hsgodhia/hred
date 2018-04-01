@@ -255,7 +255,12 @@ def main():
     parser.add_argument('-lr', dest='lr', type=float, default=0.001, help='learning rate for optimizer')
     parser.add_argument('-bs', dest='bt_siz', type=int, default=100, help='batch size')
     parser.add_argument('-bms', dest='beam', type=int, default=1, help='beam size for decoding')
-
+    parser.add_argument('-vsz', dest='vocab_size', type=int, default=10004, help='size of vocabulary')
+    parser.add_argument('-esz', dest='emb_size', type=int, default=300, help='embedding size enc/dec same')
+    parser.add_argument('-uthid', dest='ut_hid_size', type=int, default=600, help='encoder utterance hidden state')
+    parser.add_argument('-seshid', dest='ses_hid_size', type=int, default=1200, help='encoder session hidden state')
+    parser.add_argument('-dechid', dest='dec_hid_size', type=int, default=600, help='decoder hidden state')
+    
     options = parser.parse_args()
     print(options)
 
