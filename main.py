@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader
 
 from modules import *
 from util import *
+from collections import Counter
 
 use_cuda = torch.cuda.is_available()
 torch.manual_seed(123)
@@ -40,7 +41,11 @@ def train(options, model):
     else:
         init_param(model)
 
-    train_dataset, valid_dataset = MovieTriples('train'), MovieTriples('valid')
+    if options.toy:
+        train_dataset, valid_dataset = MovieTriples('train', 1000), MovieTriples('valid', 100)
+    else:
+        train_dataset, valid_dataset = MovieTriples('train'), MovieTriples('valid')
+        
     train_dataloader = DataLoader(train_dataset, batch_size=options.bt_siz, shuffle=True, num_workers=2,
                                   collate_fn=custom_collate_fn)
     valid_dataloader = DataLoader(valid_dataset, batch_size=options.bt_siz, shuffle=True, num_workers=2,
@@ -53,10 +58,17 @@ def train(options, model):
     if use_cuda:
         criteria.cuda()
     
+    best_vl_loss, patience, batch_id = 10000, 0, 0
     for i in range(options.epoch):
+        if patience == options.patience:
+            break
         tr_loss, tlm_loss, num_words = 0, 0, 0
         strt = time.time()
+        
         for i_batch, sample_batch in enumerate(tqdm(train_dataloader)):
+            new_tc_ratio = 2100.0/(2100.0 + math.exp(batch_id/2100.0))
+            model.dec.set_tc_ratio(new_tc_ratio)
+            
             preds, lmpreds = model(sample_batch)
             u3 = sample_batch[4]
             if use_cuda:
@@ -64,7 +76,7 @@ def train(options, model):
                 
             preds = preds[:, :-1, :].contiguous().view(-1, preds.size(2))
             u3 = u3[:, 1:].contiguous().view(-1)
-
+            
             loss = criteria(preds, u3)
             target_toks = u3.ne(10003).long().sum().data[0]
             
@@ -84,71 +96,108 @@ def train(options, model):
                 lm_loss.backward()
             clip_gnorm(model)
             optimizer.step()
+            
+            batch_id += 1
 
         vl_loss = calc_valid_loss(valid_dataloader, criteria, model)
         print("Training loss {} lm loss {} Valid loss {}".format(tr_loss/num_words, tlm_loss/num_words, vl_loss))
-        print("epoch {} took {} miss".format(i+1, (time.time() - strt)/60.0))
-        if i % 2 == 0 or i == options.epoch -1:
+        print("epoch {} took {} mins".format(i+1, (time.time() - strt)/60.0))
+        print("tc ratio", model.dec.get_tc_ratio())
+        if vl_loss < best_vl_loss or options.toy:
             torch.save(model.state_dict(), options.name + '_mdl.pth')
             torch.save(optimizer.state_dict(), options.name + '_opti_st.pth')
-
+            best_vl_loss = vl_loss
+            patience = 0
+        else:
+            patience += 1
 
 def load_model_state(mdl, fl):
     saved_state = torch.load(fl)
     mdl.load_state_dict(saved_state)
     
     
-def generate(model, ses_encoding, beam, diversity_rate):
+def generate(model, ses_encoding, options):
+    diversity_rate = 2
+    antilm_param = 10
+    beam = options.beam
+    
     n_candidates, final_candids = [], []
     candidates = [([1], 0, 0)]
     gen_len, max_gen_len = 1, 20
-    pbar = tqdm(total=max_gen_len)
-
-
+    
     # we provide the top k options/target defined each time
     while gen_len <= max_gen_len:
         for c in candidates:
             seq, pts_score, pt_score = c[0], c[1], c[2]
             _target = Variable(torch.LongTensor([seq]), volatile=True)
-            dec_o, _ = model.dec([ses_encoding, _target, [len(seq)]])
+            dec_o, dec_lm = model.dec([ses_encoding, _target, [len(seq)]])
             dec_o = dec_o[:, :, :-1]
 
             op = F.log_softmax(dec_o, 2, 5)
             op = op[:, -1, :]
             topval, topind = op.topk(beam, 1)
-
+            
+            if options.lm:
+                dec_lm = dec_lm[:, :, :-1]
+                lm_op = F.log_softmax(dec_lm, 2, 5)
+                lm_op = lm_op[:, -1, :]
+            
             for i in range(beam):
                 ctok, cval = topind.data[0, i], topval.data[0, i]
+                if options.lm:
+                    uval = lm_op.data[0, ctok]
+                    if dec_lm.size(1) > antilm_param:
+                        uval = 0.0
+                else:
+                    uval = 0.0
+                    
                 if ctok == 2:
                     list_to_append = final_candids
                 else:
                     list_to_append = n_candidates
 
-                list_to_append.append((seq + [ctok], pts_score + cval - diversity_rate*(i+1), 0))
+                list_to_append.append((seq + [ctok], pts_score + cval - diversity_rate*(i+1), pt_score + uval))
 
-        n_candidates.sort(key=lambda temp: temp[1]/len(temp[0])**0.7, reverse=True)
+        n_candidates.sort(key=lambda temp: sort_key(temp, options.mmi), reverse=True)
         candidates = copy.copy(n_candidates[:beam])
         n_candidates[:] = []
         gen_len += 1
-        pbar.update(1)
-
-    pbar.close()
+        
     final_candids = final_candids + candidates
-    final_candids.sort(key=lambda temp: temp[1]/len(temp[0])**0.7, reverse=True)
+    final_candids.sort(key=lambda temp: sort_key(temp, options.mmi), reverse=True)
 
     return final_candids[:beam]    
 
+def sort_key(temp, mmi):
+    if mmi:
+        lambda_param = 0.25
+        return temp[1] - lambda_param*temp[2] + len(temp[0])*0.1
+    else:
+        return temp[1]/len(temp[0])**0.7
+
+def get_sent_ll(u3, u3_lens, model, criteria, ses_encoding):
+    preds, _ = model.dec([ses_encoding, u3, u3_lens])
+    preds = preds[:, :-1, :].contiguous().view(-1, preds.size(2))
+    u3 = u3[:, 1:].contiguous().view(-1)
+    loss = criteria(preds, u3).data[0]
+    target_toks = u3.ne(10003).long().sum().data[0]
+    return -1*loss/target_toks
+    
 # sample a sentence from the test set by using beam search
 def inference_beam(dataloader, model, inv_dict, options):
+    criteria = nn.CrossEntropyLoss(ignore_index=10003, size_average=False)
+    if use_cuda:
+        criteria.cuda()
+    
     cur_tc = model.dec.get_teacher_forcing()
     model.dec.set_teacher_forcing(True)
-    
+    fout = open(options.name + "_result.txt",'w')
     load_model_state(model, options.name + "_mdl.pth")
     model.eval()
-    diversity_rate = 1
-    antilm_param = 20
-    lambda_param = 0.4
 
+    test_ppl = calc_valid_loss(dataloader, criteria, model)
+    print("test preplexity is:{}".format(test_ppl))
+    
     for i_batch, sample_batch in enumerate(dataloader):
         u1, u1_lens, u2, u2_lens, u3, u3_lens = sample_batch[0], sample_batch[1], sample_batch[2], sample_batch[3], \
                                                 sample_batch[4], sample_batch[5]
@@ -156,19 +205,30 @@ def inference_beam(dataloader, model, inv_dict, options):
         if use_cuda:
             u1 = u1.cuda()
             u2 = u2.cuda()
+            u3 = u3.cuda()
+        
         o1, o2 = model.base_enc((u1, u1_lens)), model.base_enc((u2, u2_lens))
         qu_seq = torch.cat((o1, o2), 1)
         # if we need to decode the intermediate queries we may need the hidden states
         final_session_o = model.ses_enc(qu_seq)
         # forward(self, ses_encoding, x=None, x_lens=None, beam=5 ):
-        sent = generate(model, final_session_o, options.beam, diversity_rate)
-        # print(sent)
-        print(tensor_to_sent(sent, inv_dict))
-        # greedy true for below because only beam generates a tuple of sequence and probability
-        print("Ground truth {} \n".format(tensor_to_sent(u3.data.cpu().numpy(), inv_dict, True)))
+        for k in range(options.bt_siz):
+            sent = generate(model, final_session_o[k, :, :].unsqueeze(0), options)
+            pt = tensor_to_sent(sent, inv_dict)
+            # greedy true for below because only beam generates a tuple of sequence and probability
+            gt = tensor_to_sent(u3[k, :].unsqueeze(0).data.cpu().numpy(), inv_dict, True)
+            fout.write(str(gt[0]) + "    |    " + str(pt[0][0]) + "\n")
+            fout.flush()
+
+            if not options.pretty:
+                print(pt)
+                print("Ground truth {} {} \n".format(gt, get_sent_ll(u3[k, :].unsqueeze(0), u3_lens[k:k+1], model, criteria, final_session_o)))
+            else:
+                print(gt[0], "|", pt[0][0])
 
     model.dec.set_teacher_forcing(cur_tc)
-
+    fout.close()
+    
 def calc_valid_loss(data_loader, criteria, model):
     model.eval()
     cur_tc = model.dec.get_teacher_forcing()
@@ -176,7 +236,7 @@ def calc_valid_loss(data_loader, criteria, model):
     # we want to find the perplexity or likelihood of the provided sequence
     
     valid_loss, num_words = 0, 0
-    for i_batch, sample_batch in enumerate(data_loader):
+    for i_batch, sample_batch in enumerate(tqdm(data_loader)):
         preds, lmpreds = model(sample_batch)
         u3 = sample_batch[4]
         if use_cuda:
@@ -226,6 +286,18 @@ def data_to_seq():
         pickle.dump(all_seqs, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+def uniq_answer(fil):
+    uniq = Counter()
+    with open(fil + '_result.txt', 'r') as fp:
+        all_lines=  fp.readlines()
+        for line in all_lines:
+            resp = line.split("    |    ")
+            uniq[resp[1].strip()] += 1
+    print('uniq', len(uniq), 'from', len(all_lines))
+    print('---all---')
+    for s in uniq.most_common():
+        print(s)
+    
 def main():
     print('torch version {}'.format(torch.__version__))
     _dict_file = '/home/harshals/hed-dlg/Data/MovieTriples/Training.dict.pkl'
@@ -244,12 +316,16 @@ def main():
     parser = argparse.ArgumentParser(description='HRED parameter options')
     parser.add_argument('-n', dest='name', help='enter suffix for model files', required=True)
     parser.add_argument('-e', dest='epoch', type=int, default=20, help='number of epochs')
+    parser.add_argument('-pt', dest='patience', type=int, default=-1, help='validtion patience for early stopping default none')
     parser.add_argument('-tc', dest='teacher', action='store_true', default=False, help='default teacher forcing')
     parser.add_argument('-bi', dest='bidi', action='store_true', default=False, help='bidirectional enc/decs')
     parser.add_argument('-test', dest='test', action='store_true', default=False, help='only test or inference')
     parser.add_argument('-shrd_dec_emb', dest='shrd_dec_emb', action='store_true', default=False, help='shared embedding in/out for decoder')
     parser.add_argument('-btstrp', dest='btstrp', default=None, help='bootstrap/load parameters give name')
     parser.add_argument('-lm', dest='lm', action='store_true', default=False, help='enable a RNN language model joint training as well')
+    parser.add_argument('-toy', dest='toy', action='store_true', default=False, help='loads only 1000 training and 100 valid for testing')
+    parser.add_argument('-pretty', dest='pretty', action='store_true', default=False, help='pretty print inference')
+    parser.add_argument('-mmi', dest='mmi', action='store_true', default=False, help='Using the mmi anti-lm for ranking beam')
     parser.add_argument('-drp', dest='drp', type=float, default=0.3, help='dropout probability used all throughout')
     parser.add_argument('-nl', dest='num_lyr', type=int, default=1, help='number of enc/dec layers(same for both)')
     parser.add_argument('-lr', dest='lr', type=float, default=0.001, help='learning rate for optimizer')
@@ -270,10 +346,15 @@ def main():
 
     if not options.test:
         train(options, model)
-    # chooses 10 examples only
-    bt_siz, test_dataset = 1, MovieTriples('test', 100)
-    test_dataloader = DataLoader(test_dataset, bt_siz, shuffle=True, num_workers=2, collate_fn=custom_collate_fn)
-    inference_beam(test_dataloader, model, inv_dict, options)
-
+    else:
+        if options.toy:
+            test_dataset = MovieTriples('test', 100)
+        else:
+            test_dataset = MovieTriples('test')
+        
+        
+        test_dataloader = DataLoader(test_dataset, options.bt_siz, shuffle=True, num_workers=2, collate_fn=custom_collate_fn)
+        # inference_beam(test_dataloader, model, inv_dict, options)
+        uniq_answer(options.name)
 
 main()

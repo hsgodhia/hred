@@ -72,41 +72,6 @@ def custom_collate_fn(batch):
     return u1_batch[sort1, :], u1_lens[sort1], u2_batch[sort2, :], u2_lens[sort2], u3_batch[sort3, :], u3_lens[sort3]
 
 
-def cmp_to_key(mycmp):
-    'Convert a cmp= function into a key= function'
-    class K(object):
-        def __init__(self, obj, *args):
-            self.obj = obj
-
-        def __lt__(self, other):
-            return mycmp(self.obj, other.obj) < 0
-
-        def __gt__(self, other):
-            return mycmp(self.obj, other.obj) > 0
-
-        def __eq__(self, other):
-            return mycmp(self.obj, other.obj) == 0
-
-        def __le__(self, other):
-            return mycmp(self.obj, other.obj) <= 0
-
-        def __ge__(self, other):
-            return mycmp(self.obj, other.obj) >= 0
-
-        def __ne__(self, other):
-            return mycmp(self.obj, other.obj) != 0
-    return K
-
-
-def cmp_dialog(d1, d2):
-    if len(d1) < len(d2):
-        return -1
-    elif len(d1) > len(d2):
-        return 1
-    else:
-        return 0
-
-
 class DialogTurn:
     def __init__(self, item):
         self.u1, self.u2, self.u3 = [], [], []

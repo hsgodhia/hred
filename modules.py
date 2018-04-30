@@ -70,12 +70,16 @@ class BaseEncoder(nn.Module):
         if self.direction == 2:
             x_hids = []
             for i in range(self.num_lyr):
-                x_hid_temp = x_hid[i, :, :] + x_hid[i+1, :, :]
+                x_hid_temp, _ = torch.max(x_hid[2*i:2*i + 2, :, :], 0, keepdim=True)
                 x_hids.append(x_hid_temp)
             x_hid = torch.cat(x_hids, 0)
         # x_o, _ = torch.nn.utils.rnn.pad_packed_sequence(x_o, batch_first=True)
         # using x_o and returning x_o[:, -1, :].unsqueeze(1) is wrong coz its all 0s careful! it doesn't adjust for variable timesteps
-        x_hid = x_hid.view(bt_siz, -1, self.hid_size)
+        
+        x_hid = x_hid[self.num_lyr-1, :, :].unsqueeze(0)
+        # take the last layer of the encoder GRU
+        x_hid = x_hid.transpose(0, 1)
+        
         return x_hid
 
 
@@ -84,12 +88,11 @@ class SessionEncoder(nn.Module):
     def __init__(self, hid_size, inp_size, options):
         super(SessionEncoder, self).__init__()
         self.hid_size = hid_size
-        self.num_lyr = options.num_lyr
         self.rnn = nn.GRU(hidden_size=hid_size, input_size=inp_size,
-                          num_layers=options.num_lyr, bidirectional=False, batch_first=True, dropout=options.drp)
+                          num_layers=1, bidirectional=False, batch_first=True, dropout=options.drp)
 
     def forward(self, x):
-        h_0 = Variable(torch.zeros(self.num_lyr, x.size(0), self.hid_size))
+        h_0 = Variable(torch.zeros(1, x.size(0), self.hid_size))
         if use_cuda:
             h_0 = h_0.cuda()
         # output, h_n for output batch is already dim 0
@@ -104,7 +107,7 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()
         self.emb_size = options.emb_size
         self.hid_size = options.dec_hid_size
-        self.num_lyr = options.num_lyr
+        self.num_lyr = 1
         self.teacher_forcing = options.teacher
         self.train_lm = options.lm
         
@@ -122,6 +125,7 @@ class Decoder(nn.Module):
         self.dec_inf = nn.Linear(self.hid_size, self.emb_size*2, False)
         self.ses_inf = nn.Linear(options.ses_hid_size, self.emb_size*2, False)
         self.emb_inf = nn.Linear(self.emb_size, self.emb_size*2, True)
+        self.tc_ratio = 1.0
         
         if options.lm:
             self.lm = nn.GRU(input_size=self.emb_size, hidden_size=self.hid_size, num_layers=self.num_lyr, batch_first=True, dropout=options.drp, bidirectional=False)
@@ -137,22 +141,21 @@ class Decoder(nn.Module):
         
         init_hidn = self.tanh(self.ses_to_dec(ses_encoding))
         init_hidn = init_hidn.view(self.num_lyr, target.size(0), self.hid_size)
-        # you probably don't want to "drop" the conditioning vector
-        hid_o, hid_n = self.rnn(target_emb, init_hidn)
         
-        hid_o, _ = torch.nn.utils.rnn.pad_packed_sequence(hid_o, batch_first=True)
-        # linear layers not compatible with PackedSequence need to unpack, will be 0s at 10003 timesteps!
+        hid_o, hid_n = self.rnn(target_emb, init_hidn)
+        hid_o, _ = torch.nn.utils.rnn.pad_packed_sequence(hid_o, batch_first=True)        
+        # linear layers not compatible with PackedSequence need to unpack, will be 0s at padded timesteps!
+        
         dec_hid_vec = self.dec_inf(hid_o)
         ses_inf_vec = self.ses_inf(ses_encoding)
-        
-        
         total_hid_o = dec_hid_vec + ses_inf_vec + emb_inf_vec
-        hid_o_mx = max_out(total_hid_o)
         
+        hid_o_mx = max_out(total_hid_o)        
         hid_o_mx = F.linear(hid_o_mx, self.embed_in.weight) if self.shared_weight else self.embed_out(hid_o_mx)
         
         if self.train_lm:
             siz = target.size(0)
+            
             lm_hid0 = Variable(torch.zeros(self.num_lyr, siz, self.hid_size))
             if use_cuda:
                 lm_hid0 = lm_hid0.cuda()
@@ -161,29 +164,42 @@ class Decoder(nn.Module):
             lm_o, _ = torch.nn.utils.rnn.pad_packed_sequence(lm_o, batch_first=True)
             lm_o = self.lin3(lm_o)
             lm_o = F.linear(lm_o, self.embed_in.weight) if self.shared_weight else self.embed_out(lm_o)
-            return hid_o, lm_o
+            return hid_o_mx, lm_o
         else:
             return hid_o_mx, None
         
         
-    def do_decode(self, siz, seq_len, ses_encoding):
+    def do_decode(self, siz, seq_len, ses_encoding, target):
+        ses_inf_vec = self.ses_inf(ses_encoding)
         ses_encoding = self.tanh(self.ses_to_dec(ses_encoding))
-        
         hid_n, preds, lm_preds = ses_encoding, [], []
+        
+        hid_n = hid_n.view(self.num_lyr, siz, self.hid_size)
         inp_tok = Variable(torch.ones(siz, 1).long())
         lm_hid = Variable(torch.zeros(self.num_lyr, siz, self.hid_size))
         if use_cuda:
             lm_hid = lm_hid.cuda()
             inp_tok = inp_tok.cuda()
 
+        
         for i in range(seq_len):
+            # initially tc_ratio is 1 but then slowly decays to 0 (to match inference time)
+            if torch.randn(1)[0] < self.tc_ratio:
+                inp_tok = target[:, i].unsqueeze(1)
+            
             inp_tok_vec = self.embed_in(inp_tok)
+            emb_inf_vec = self.emb_inf(inp_tok_vec)
+            
             inp_tok_vec = self.drop(inp_tok_vec)
             
             hid_o, hid_n = self.rnn(inp_tok_vec, hid_n)
-            hid_o = self.lin2(hid_o)
-            hid_o = F.linear(hid_o, self.embed_in.weight) if self.shared_weight else self.embed_out(hid_o)
-            preds.append(hid_o)
+            dec_hid_vec = self.dec_inf(hid_o)
+            
+            total_hid_o = dec_hid_vec + ses_inf_vec + emb_inf_vec
+            hid_o_mx = max_out(total_hid_o)
+
+            hid_o_mx = F.linear(hid_o_mx, self.embed_in.weight) if self.shared_weight else self.embed_out(hid_o_mx)
+            preds.append(hid_o_mx)
             
             if self.train_lm:
                 lm_o, lm_hid = self.lm(inp_tok_vec, lm_hid)
@@ -221,7 +237,7 @@ class Decoder(nn.Module):
         if self.teacher_forcing:
             dec_o, dec_lm = self.do_decode_tc(ses_encoding, x, x_lens)
         else:
-            dec_o, dec_lm = self.do_decode(siz, seq_len, ses_encoding)
+            dec_o, dec_lm = self.do_decode(siz, seq_len, ses_encoding, x)
             
         return dec_o, dec_lm
 
@@ -230,3 +246,9 @@ class Decoder(nn.Module):
     
     def get_teacher_forcing(self):
         return self.teacher_forcing
+    
+    def set_tc_ratio(self, new_val):
+        self.tc_ratio = new_val
+    
+    def get_tc_ratio(self):
+        return self.tc_ratio
