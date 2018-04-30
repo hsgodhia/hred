@@ -1,4 +1,4 @@
-##### An implementation of the paper  [Building End-To-End Dialogue Systems Using Generative Hierarchical Neural Network Models](https://arxiv.org/abs/1507.04808) and  [ Diverse Beam Search: Decoding Diverse Solutions from Neural Sequence Models](https://arxiv.org/abs/1610.02424)
+##### An implementation of the paper  [Building End-To-End Dialogue Systems Using Generative Hierarchical Neural Network Models](https://arxiv.org/abs/1507.04808) and  [Mutual Information and Diverse Decoding Improve Neural Machine Translation](https://arxiv.org/abs/1601.00372)
 
 #### Results
 
